@@ -38,6 +38,14 @@ def _retry_backoff_seconds(attempt: int) -> float:
     return min(1.0, 0.25 * attempt)
 
 
+def _order_type_candidates() -> tuple[str, ...]:
+    """Tipos de ordem tentados em sequência para reduzir rejeições transitórias."""
+    raw = os.getenv("ORDER_TYPE_CANDIDATES", "FOK,IOC")
+    parsed = [x.strip().upper() for x in raw.split(",") if x.strip()]
+    allowed = [x for x in parsed if x in {"FOK", "IOC", "GTC"}]
+    return tuple(allowed) if allowed else ("FOK", "IOC")
+
+
 @dataclass
 class OrderResult:
     success:   bool
@@ -236,9 +244,11 @@ class PolymarketExecutor:
             # Alguns mercados exigem versão de ordem com neg_risk=True.
             # Tentamos ambos para lidar com order_version_mismatch de forma robusta.
             neg_risk_candidates = (False, True)
+            order_type_candidates = _order_type_candidates()
 
             for attempt in range(1, attempts + 1):
                 used_neg_risk = None
+                used_order_type = None
                 try:
                     # Recria a ordem em cada tentativa para obter versão/timestamp atualizados.
                     resp = None
@@ -250,15 +260,20 @@ class PolymarketExecutor:
                             tick_size="0.01",
                             neg_risk=neg_risk,
                         )
-                        try:
-                            signed_order = self._clob_client.create_order(order_args, options)
-                            resp = self._clob_client.post_order(signed_order, "FOK")
+                        for order_type in order_type_candidates:
+                            used_order_type = order_type
+                            try:
+                                signed_order = self._clob_client.create_order(order_args, options)
+                                resp = self._clob_client.post_order(signed_order, order_type)
+                                break
+                            except Exception as e:
+                                last_exc = e
+                                if _is_order_version_mismatch_error(e):
+                                    continue
+                                raise
+
+                        if resp is not None:
                             break
-                        except Exception as e:
-                            last_exc = e
-                            if _is_order_version_mismatch_error(e):
-                                continue
-                            raise
 
                     if resp is None and last_exc is not None:
                         raise last_exc
@@ -299,7 +314,7 @@ class PolymarketExecutor:
                     error=(
                         f"{err_msg} "
                         f"(side={side}, token={token_id}, price={norm_price}, size={norm_size}, "
-                        f"neg_risk={used_neg_risk})"
+                        f"neg_risk={used_neg_risk}, order_type={used_order_type})"
                     ),
                 )
 
