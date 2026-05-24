@@ -1,0 +1,19 @@
+# Python caches and environments
+**/__pycache__/
+**/*.py[cod]
+**/.venv/
+
+# Secrets and local env files
+**/.env
+**/.env.*
+!**/.env.example
+
+# Sensitive bot data
+**/.secure_data/
+**/users.db
+**/*.sqlite
+**/*.sqlite3
+
+# Logs and OS files
+**/*.log
+.DS_Store

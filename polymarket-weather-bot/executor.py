@@ -1,0 +1,222 @@
+"""
+executor.py — Integração com a CLOB API da Polymarket
+Autenticação L1/L2, criação e envio de ordens
+"""
+
+import asyncio
+import aiohttp
+import hashlib
+import hmac
+import time
+import json
+from typing import Optional
+from dataclasses import dataclass
+
+CLOB_HOST = "https://clob.polymarket.com"
+CHAIN_ID  = 137  # Polygon
+
+
+@dataclass
+class OrderResult:
+    success:   bool
+    order_id:  Optional[str]
+    error:     Optional[str]
+    size_filled: float = 0.0
+    price_avg:   float = 0.0
+
+
+class PolymarketExecutor:
+    """
+    Gerencia autenticação e execução de ordens na Polymarket.
+    Cada usuário tem sua própria instância com suas credenciais.
+    """
+
+    def __init__(self, private_key: str, proxy_wallet: str, sig_type: int = 1):
+        self.private_key   = private_key
+        self.proxy_wallet  = proxy_wallet
+        self.sig_type      = sig_type   # 1=Magic/Proxy, 2=Gnosis, 3=EIP-1271
+        self._api_key      = None
+        self._api_secret   = None
+        self._api_passphrase = None
+        self._authenticated = False
+
+    async def authenticate(self) -> bool:
+        """
+        Realiza autenticação L1 (EIP-712) e obtém credenciais L2.
+        Usa py-clob-client em thread separada para não bloquear o event loop.
+        """
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, self._sync_authenticate
+            )
+            return result
+        except Exception as e:
+            print(f"[Executor] Erro de autenticação: {e}")
+            return False
+
+    def _sync_authenticate(self) -> bool:
+        """Autenticação síncrona via py-clob-client."""
+        try:
+            from py_clob_client.client import ClobClient
+            client = ClobClient(
+                host=CLOB_HOST,
+                chain_id=CHAIN_ID,
+                key=self.private_key,
+                signature_type=self.sig_type,
+                funder=self.proxy_wallet,
+            )
+            creds = client.create_or_derive_api_creds()
+            self._api_key        = creds.api_key
+            self._api_secret     = creds.api_secret
+            self._api_passphrase = creds.api_passphrase
+            self._clob_client    = client
+            self._authenticated  = True
+            return True
+        except ImportError:
+            # Modo simulação quando py-clob-client não está instalado
+            self._authenticated = True
+            self._simulation_mode = True
+            return True
+        except Exception as e:
+            print(f"[Executor] _sync_authenticate falhou: {e}")
+            return False
+
+    async def get_balance(self) -> Optional[float]:
+        """Retorna saldo em USDC da carteira."""
+        if not self._authenticated:
+            await self.authenticate()
+
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, self._sync_get_balance
+            )
+            return result
+        except Exception:
+            return None
+
+    def _sync_get_balance(self) -> Optional[float]:
+        try:
+            if getattr(self, "_simulation_mode", False):
+                return 1000.0  # saldo simulado
+
+            resp = self._clob_client.get_balance_allowance(
+                params={"asset_type": "USDC"}
+            )
+            return float(resp.get("balance", 0)) / 1e6
+        except Exception:
+            return None
+
+    async def place_order(
+        self,
+        token_id: str,
+        side: str,
+        price: float,
+        size: float,
+    ) -> OrderResult:
+        """
+        Envia uma ordem FOK (Fill or Kill) na Polymarket.
+        FOK garante que ou executa completa ou cancela — sem ordens parciais pendentes.
+        """
+        if not self._authenticated:
+            ok = await self.authenticate()
+            if not ok:
+                return OrderResult(success=False, order_id=None,
+                                   error="Falha na autenticação")
+
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._sync_place_order(token_id, side, price, size)
+            )
+            return result
+        except Exception as e:
+            return OrderResult(success=False, order_id=None, error=str(e))
+
+    def _sync_place_order(self, token_id: str, side: str,
+                          price: float, size: float) -> OrderResult:
+        """Criação síncrona da ordem."""
+        try:
+            if getattr(self, "_simulation_mode", False):
+                # Modo simulação — não executa trade real
+                fake_id = f"SIM_{int(time.time())}"
+                return OrderResult(
+                    success=True,
+                    order_id=fake_id,
+                    error=None,
+                    size_filled=size,
+                    price_avg=price,
+                )
+
+            from py_clob_client.clob_types import OrderArgs, PartialCreateOrderOptions
+            from py_clob_client.order_builder.constants import BUY, SELL
+
+            order_side = BUY if side == "YES" else SELL
+
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=round(price, 4),
+                size=round(size, 2),
+                side=order_side,
+            )
+
+            # FOK: Fill or Kill — executa tudo ou cancela
+            options = PartialCreateOrderOptions(
+                tick_size=0.01,
+                neg_risk=False,
+            )
+
+            signed_order = self._clob_client.create_order(order_args, options)
+            resp = self._clob_client.post_order(signed_order, "FOK")
+
+            if resp and resp.get("success"):
+                return OrderResult(
+                    success=True,
+                    order_id=resp.get("orderID", ""),
+                    error=None,
+                    size_filled=float(resp.get("sizeFilled", size)),
+                    price_avg=float(resp.get("price", price)),
+                )
+            else:
+                return OrderResult(
+                    success=False,
+                    order_id=None,
+                    error=resp.get("errorMsg", "Ordem rejeitada"),
+                )
+
+        except Exception as e:
+            return OrderResult(success=False, order_id=None, error=str(e))
+
+    async def get_positions(self) -> list[dict]:
+        """Retorna posições abertas do usuário."""
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, self._sync_get_positions
+            )
+            return result
+        except Exception:
+            return []
+
+    def _sync_get_positions(self) -> list[dict]:
+        try:
+            if getattr(self, "_simulation_mode", False):
+                return []
+            resp = self._clob_client.get_positions()
+            return resp if isinstance(resp, list) else []
+        except Exception:
+            return []
+
+
+# Cache de executores por usuário (evita re-autenticar a cada scan)
+_executor_cache: dict[int, PolymarketExecutor] = {}
+
+
+def get_executor(chat_id: int, private_key: str, proxy_wallet: str) -> PolymarketExecutor:
+    """Retorna executor cacheado ou cria um novo."""
+    if chat_id not in _executor_cache:
+        _executor_cache[chat_id] = PolymarketExecutor(private_key, proxy_wallet)
+    return _executor_cache[chat_id]
+
+
+def clear_executor(chat_id: int):
+    """Remove executor do cache (ex: ao desconectar)."""
+    _executor_cache.pop(chat_id, None)

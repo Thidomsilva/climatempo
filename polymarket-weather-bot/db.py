@@ -1,0 +1,178 @@
+"""
+db.py — Gerenciamento de sessões de usuário (SQLite)
+Armazena: private key criptografada, proxy wallet, configurações por usuário
+"""
+
+import sqlite3
+import os
+from cryptography.fernet import Fernet
+from dotenv import load_dotenv
+
+load_dotenv()
+
+def _build_secure_db_path() -> str:
+    """Cria diretório privado para dados sensíveis e retorna caminho do SQLite."""
+    data_dir = os.getenv("APP_DATA_DIR", ".secure_data")
+    os.makedirs(data_dir, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(data_dir, 0o700)
+    except OSError:
+        # Em alguns ambientes (ex.: FS gerenciado), chmod pode não ser permitido.
+        pass
+    return os.path.join(data_dir, "users.db")
+
+
+DB_PATH = _build_secure_db_path()
+
+# Chave obrigatória para manter criptografia consistente entre reinícios/deploy.
+ENCRYPT_KEY = os.getenv("ENCRYPT_KEY", "").strip()
+if not ENCRYPT_KEY:
+    raise RuntimeError("ENCRYPT_KEY não definida. Configure em variável de ambiente ou no arquivo .env.")
+
+fernet = Fernet(ENCRYPT_KEY.encode() if isinstance(ENCRYPT_KEY, str) else ENCRYPT_KEY)
+
+
+def _open_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        os.chmod(DB_PATH, 0o600)
+    except OSError:
+        pass
+    return conn
+
+
+def init_db():
+    conn = _open_conn()
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            chat_id       INTEGER PRIMARY KEY,
+            private_key   TEXT,
+            proxy_wallet  TEXT,
+            trade_size    REAL    DEFAULT 10.0,
+            min_edge      REAL    DEFAULT 0.15,
+            active        INTEGER DEFAULT 1,
+            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS trades (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id       INTEGER,
+            market_id     TEXT,
+            question      TEXT,
+            side          TEXT,
+            price         REAL,
+            size          REAL,
+            model_prob    REAL,
+            edge          REAL,
+            status        TEXT DEFAULT 'pending',
+            order_id      TEXT,
+            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def save_user(chat_id: int, private_key: str, proxy_wallet: str):
+    encrypted_key = fernet.encrypt(private_key.encode()).decode()
+    conn = _open_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO users (chat_id, private_key, proxy_wallet)
+        VALUES (?, ?, ?)
+        ON CONFLICT(chat_id) DO UPDATE SET
+            private_key=excluded.private_key,
+            proxy_wallet=excluded.proxy_wallet,
+            active=1
+    """, (chat_id, encrypted_key, proxy_wallet))
+    conn.commit()
+    conn.close()
+
+
+def get_user(chat_id: int) -> dict | None:
+    conn = _open_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE chat_id=?", (chat_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    keys = ["chat_id", "private_key", "proxy_wallet", "trade_size", "min_edge", "active", "created_at"]
+    user = dict(zip(keys, row))
+    user["private_key"] = fernet.decrypt(user["private_key"].encode()).decode()
+    return user
+
+
+def update_user_settings(chat_id: int, trade_size: float = None, min_edge: float = None):
+    conn = _open_conn()
+    c = conn.cursor()
+    if trade_size is not None:
+        c.execute("UPDATE users SET trade_size=? WHERE chat_id=?", (trade_size, chat_id))
+    if min_edge is not None:
+        c.execute("UPDATE users SET min_edge=? WHERE chat_id=?", (min_edge, chat_id))
+    conn.commit()
+    conn.close()
+
+
+def set_user_active(chat_id: int, active: bool):
+    conn = _open_conn()
+    c = conn.cursor()
+    c.execute("UPDATE users SET active=? WHERE chat_id=?", (int(active), chat_id))
+    conn.commit()
+    conn.close()
+
+
+def get_all_active_users() -> list[dict]:
+    conn = _open_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE active=1")
+    rows = c.fetchall()
+    conn.close()
+    keys = ["chat_id", "private_key", "proxy_wallet", "trade_size", "min_edge", "active", "created_at"]
+    users = []
+    for row in rows:
+        u = dict(zip(keys, row))
+        try:
+            u["private_key"] = fernet.decrypt(u["private_key"].encode()).decode()
+        except Exception:
+            continue
+        users.append(u)
+    return users
+
+
+def log_trade(chat_id: int, market_id: str, question: str, side: str,
+              price: float, size: float, model_prob: float, edge: float,
+              status: str = "pending", order_id: str = None) -> int:
+    conn = _open_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO trades (chat_id, market_id, question, side, price, size, model_prob, edge, status, order_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (chat_id, market_id, question, side, price, size, model_prob, edge, status, order_id))
+    trade_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return trade_id
+
+
+def update_trade_status(trade_id: int, status: str, order_id: str = None):
+    conn = _open_conn()
+    c = conn.cursor()
+    c.execute("UPDATE trades SET status=?, order_id=? WHERE id=?", (status, order_id, trade_id))
+    conn.commit()
+    conn.close()
+
+
+def get_user_trades(chat_id: int, limit: int = 10) -> list[dict]:
+    conn = _open_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT * FROM trades WHERE chat_id=? ORDER BY created_at DESC LIMIT ?
+    """, (chat_id, limit))
+    rows = c.fetchall()
+    conn.close()
+    keys = ["id", "chat_id", "market_id", "question", "side", "price",
+            "size", "model_prob", "edge", "status", "order_id", "created_at"]
+    return [dict(zip(keys, row)) for row in rows]

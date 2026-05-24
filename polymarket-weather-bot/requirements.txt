@@ -1,0 +1,23 @@
+# requirements.txt — PolyWeather Telegram Bot
+
+# Telegram
+python-telegram-bot==20.7
+
+# HTTP assíncrono
+aiohttp==3.9.3
+
+# Polymarket CLOB
+py-clob-client==0.18.0
+
+# Ethereum (derivar endereço a partir da private key)
+eth-account==0.13.4
+
+# Criptografia de chaves
+cryptography==42.0.5
+
+# Estatística para cálculo de probabilidade de bucket
+scipy==1.12.0
+numpy==1.26.4
+
+# Utilitários
+python-dotenv==1.0.1
