@@ -615,9 +615,16 @@ async def scan_opportunities(min_edge: float = 0.15) -> list["Opportunity"]:
                     if net_edge < min_edge:
                         continue
 
-                    token_id = token_ids[0] if token_ids else ""
                     side = "YES" if edge > 0 else "NO"
                     trade_price = yes_price if side == "YES" else (1 - yes_price)
+
+                    # Em mercado binário, NO usa o segundo token (quando disponível).
+                    if side == "YES":
+                        token_id = token_ids[0] if len(token_ids) >= 1 else ""
+                    else:
+                        token_id = token_ids[1] if len(token_ids) >= 2 else ""
+                    if not token_id:
+                        continue
 
                     city_display = key.split("|")[0].title()
 
@@ -667,9 +674,11 @@ async def scan_opportunities(min_edge: float = 0.15) -> list["Opportunity"]:
                     # Token ID deste outcome
                     token_id = token_ids[i] if i < len(token_ids) else ""
 
-                    # Lado: compra YES se modelo > mercado, NO se modelo < mercado
-                    side = "YES" if edge > 0 else "NO"
-                    trade_price = price if side == "YES" else (1 - price)
+                    # Em mercados multi-outcome operamos apenas compra do outcome (long-only).
+                    if edge <= 0:
+                        continue
+                    side = "YES"
+                    trade_price = price
 
                     city_display = key.split("|")[0].title()
 

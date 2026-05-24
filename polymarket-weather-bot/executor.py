@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import time
 import json
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 from dataclasses import dataclass
 
@@ -175,14 +176,31 @@ class PolymarketExecutor:
                 )
 
             from py_clob_client.clob_types import OrderArgs, PartialCreateOrderOptions
-            from py_clob_client.order_builder.constants import BUY, SELL
+            from py_clob_client.order_builder.constants import BUY
 
-            order_side = BUY if side == "YES" else SELL
+            # Operação long-only: YES/NO significa qual token comprar.
+            order_side = BUY
+
+            if not token_id:
+                return OrderResult(
+                    success=False,
+                    order_id=None,
+                    error="Token inválido para execução",
+                )
+
+            # CLOB usa tick de 0.01; normaliza evitando erros numéricos de float.
+            norm_price = float(
+                Decimal(str(price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            )
+            norm_price = max(0.01, min(0.99, norm_price))
+            norm_size = float(
+                Decimal(str(size)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            )
 
             order_args = OrderArgs(
                 token_id=token_id,
-                price=round(price, 4),
-                size=round(size, 2),
+                price=norm_price,
+                size=norm_size,
                 side=order_side,
             )
 
@@ -211,7 +229,11 @@ class PolymarketExecutor:
                 )
 
         except Exception as e:
-            return OrderResult(success=False, order_id=None, error=str(e))
+            return OrderResult(
+                success=False,
+                order_id=None,
+                error=f"{type(e).__name__}: {e}",
+            )
 
     async def get_positions(self) -> list[dict]:
         """Retorna posições abertas do usuário."""
