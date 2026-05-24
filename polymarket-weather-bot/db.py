@@ -41,6 +41,20 @@ def _open_conn() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_user_columns(conn: sqlite3.Connection):
+    """Garante colunas novas sem quebrar bancos já existentes."""
+    c = conn.cursor()
+    c.execute("PRAGMA table_info(users)")
+    existing = {row[1] for row in c.fetchall()}
+
+    if "max_daily_trades" not in existing:
+        c.execute("ALTER TABLE users ADD COLUMN max_daily_trades INTEGER DEFAULT 8")
+    if "max_daily_exposure" not in existing:
+        c.execute("ALTER TABLE users ADD COLUMN max_daily_exposure REAL DEFAULT 100.0")
+    if "min_confidence" not in existing:
+        c.execute("ALTER TABLE users ADD COLUMN min_confidence REAL DEFAULT 0.55")
+
+
 def init_db():
     conn = _open_conn()
     c = conn.cursor()
@@ -51,6 +65,9 @@ def init_db():
             proxy_wallet  TEXT,
             trade_size    REAL    DEFAULT 10.0,
             min_edge      REAL    DEFAULT 0.15,
+            max_daily_trades   INTEGER DEFAULT 8,
+            max_daily_exposure REAL    DEFAULT 100.0,
+            min_confidence     REAL    DEFAULT 0.55,
             active        INTEGER DEFAULT 1,
             created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -71,6 +88,8 @@ def init_db():
             created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    _ensure_user_columns(conn)
     conn.commit()
     conn.close()
 
@@ -99,19 +118,36 @@ def get_user(chat_id: int) -> dict | None:
     conn.close()
     if not row:
         return None
-    keys = ["chat_id", "private_key", "proxy_wallet", "trade_size", "min_edge", "active", "created_at"]
+    keys = [
+        "chat_id", "private_key", "proxy_wallet", "trade_size", "min_edge",
+        "max_daily_trades", "max_daily_exposure", "min_confidence",
+        "active", "created_at",
+    ]
     user = dict(zip(keys, row))
     user["private_key"] = fernet.decrypt(user["private_key"].encode()).decode()
     return user
 
 
-def update_user_settings(chat_id: int, trade_size: float = None, min_edge: float = None):
+def update_user_settings(
+    chat_id: int,
+    trade_size: float = None,
+    min_edge: float = None,
+    max_daily_trades: int = None,
+    max_daily_exposure: float = None,
+    min_confidence: float = None,
+):
     conn = _open_conn()
     c = conn.cursor()
     if trade_size is not None:
         c.execute("UPDATE users SET trade_size=? WHERE chat_id=?", (trade_size, chat_id))
     if min_edge is not None:
         c.execute("UPDATE users SET min_edge=? WHERE chat_id=?", (min_edge, chat_id))
+    if max_daily_trades is not None:
+        c.execute("UPDATE users SET max_daily_trades=? WHERE chat_id=?", (max_daily_trades, chat_id))
+    if max_daily_exposure is not None:
+        c.execute("UPDATE users SET max_daily_exposure=? WHERE chat_id=?", (max_daily_exposure, chat_id))
+    if min_confidence is not None:
+        c.execute("UPDATE users SET min_confidence=? WHERE chat_id=?", (min_confidence, chat_id))
     conn.commit()
     conn.close()
 
@@ -130,7 +166,11 @@ def get_all_active_users() -> list[dict]:
     c.execute("SELECT * FROM users WHERE active=1")
     rows = c.fetchall()
     conn.close()
-    keys = ["chat_id", "private_key", "proxy_wallet", "trade_size", "min_edge", "active", "created_at"]
+    keys = [
+        "chat_id", "private_key", "proxy_wallet", "trade_size", "min_edge",
+        "max_daily_trades", "max_daily_exposure", "min_confidence",
+        "active", "created_at",
+    ]
     users = []
     for row in rows:
         u = dict(zip(keys, row))
@@ -176,3 +216,23 @@ def get_user_trades(chat_id: int, limit: int = 10) -> list[dict]:
     keys = ["id", "chat_id", "market_id", "question", "side", "price",
             "size", "model_prob", "edge", "status", "order_id", "created_at"]
     return [dict(zip(keys, row)) for row in rows]
+
+
+def get_today_trade_stats(chat_id: int) -> dict:
+    """Retorna estatísticas de execução do dia atual (UTC) para controle de risco."""
+    conn = _open_conn()
+    c = conn.cursor()
+    c.execute(
+        """
+        SELECT COUNT(*), COALESCE(SUM(size), 0)
+        FROM trades
+        WHERE chat_id=? AND status='executed' AND date(created_at)=date('now')
+        """,
+        (chat_id,),
+    )
+    row = c.fetchone() or (0, 0)
+    conn.close()
+    return {
+        "count": int(row[0] or 0),
+        "exposure": float(row[1] or 0.0),
+    }

@@ -45,6 +45,7 @@ WAITING_API_PASS     = 8
 _pending_key:         dict[int, str]  = {}
 _pending_wallet_type: dict[int, str]  = {}
 _pending_opps:        dict[int, list] = {}
+_scan_tasks:          dict[int, asyncio.Task] = {}
 
 # ─── Tipos de carteira suportados ─────────────────────────────────────────────
 WALLET_TYPES = {
@@ -116,6 +117,7 @@ def main_menu_keyboard(connected: bool) -> InlineKeyboardMarkup:
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    log.info(f"[Start] recebido de chat_id={chat_id}")
     db.init_db()
     user = db.get_user(chat_id)
 
@@ -137,6 +139,23 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=main_menu_keyboard(connected=bool(user)),
     )
+
+
+async def start_alias(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Responde quando o usuário digita 'start' sem barra."""
+    if update.message and update.message.text and update.message.text.strip().lower() == "start":
+        await start(update, ctx)
+
+
+async def ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("pong ✅ bot online")
+
+
+def ensure_scan_task(chat_id: int, app):
+    existing = _scan_tasks.get(chat_id)
+    if existing and not existing.done():
+        return
+    _scan_tasks[chat_id] = asyncio.create_task(scan_loop(chat_id, app))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -294,69 +313,82 @@ async def _finalize_connection(chat_id: int, private_key: str,
                                 proxy_wallet: str | None,
                                 ctx: ContextTypes.DEFAULT_TYPE):
     """Passo final — Autentica, salva e inicia o scanner."""
-    wtype     = _pending_wallet_type.pop(chat_id, "metamask")
-    sig_type  = WALLET_TYPES[wtype]["sig_type"]
-    wallet_label = WALLET_TYPES[wtype]["label"]
+    try:
+        wtype     = _pending_wallet_type.pop(chat_id, "metamask")
+        sig_type  = WALLET_TYPES[wtype]["sig_type"]
+        wallet_label = WALLET_TYPES[wtype]["label"]
 
-    # Se proxy não foi informado, tenta derivar
-    if proxy_wallet is None:
-        proxy_wallet = _derive_proxy_wallet(private_key)
-        if not proxy_wallet:
+        # Se proxy não foi informado, tenta derivar
+        if proxy_wallet is None:
+            proxy_wallet = _derive_proxy_wallet(private_key)
+            if not proxy_wallet:
+                await ctx.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "❌ Não foi possível derivar o endereço automaticamente.\n"
+                        "Por favor, informe seu Proxy Wallet manualmente (0x...):"
+                    ),
+                )
+                _pending_key[chat_id] = private_key
+                return WAITING_PROXY_WALLET
+
+        # Autentica
+        ex = exe.PolymarketExecutor(private_key, proxy_wallet, sig_type=sig_type)
+        ok = await ex.authenticate()
+
+        _pending_key.pop(chat_id, None)
+
+        if not ok:
             await ctx.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    "❌ Não foi possível derivar o endereço automaticamente.\n"
-                    "Por favor, informe seu Proxy Wallet manualmente (0x...):"
+                    "❌ *Falha na autenticação.*\n\n"
+                    "Possíveis causas:\n"
+                    "• Private key incorreta\n"
+                    "• Proxy Wallet não corresponde à chave\n"
+                    "• Carteira sem fundos na Polymarket\n\n"
+                    "Use /start para tentar novamente."
                 ),
+                parse_mode=ParseMode.MARKDOWN,
             )
-            _pending_key[chat_id] = private_key
-            return WAITING_PROXY_WALLET
+            return ConversationHandler.END
 
-    # Autentica
-    ex = exe.PolymarketExecutor(private_key, proxy_wallet, sig_type=sig_type)
-    ok = await ex.authenticate()
+        balance = await ex.get_balance()
+        balance_text = f"${balance:.2f} USDC" if balance is not None else "indisponível no momento"
 
-    _pending_key.pop(chat_id, None)
+        db.save_user(chat_id, private_key, proxy_wallet)
+        exe._executor_cache[chat_id] = ex
 
-    if not ok:
+        short_wallet = f"{proxy_wallet[:6]}...{proxy_wallet[-4:]}"
+
         await ctx.bot.send_message(
             chat_id=chat_id,
             text=(
-                "❌ *Falha na autenticação.*\n\n"
-                "Possíveis causas:\n"
-                "• Private key incorreta\n"
-                "• Proxy Wallet não corresponde à chave\n"
-                "• Carteira sem fundos na Polymarket\n\n"
-                "Use /start para tentar novamente."
+                "✅ *Conta conectada com sucesso!*\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🔑 Tipo:    `{wallet_label}`\n"
+                f"👛 Wallet:  `{short_wallet}`\n"
+                f"💰 Saldo:   `{balance_text}`\n\n"
+                "📡 *Scanner ativo* — você receberá alertas a cada 5 min "
+                "quando houver oportunidade com edge ≥ 15%.\n\n"
+                "Use as configurações para ajustar tamanho e edge mínimo."
             ),
             parse_mode=ParseMode.MARKDOWN,
+            reply_markup=main_menu_keyboard(connected=True),
+        )
+
+        ensure_scan_task(chat_id, ctx.application)
+        return ConversationHandler.END
+    except Exception as e:
+        log.exception(f"[FinalizeConnection] erro chat_id={chat_id}: {e}")
+        await ctx.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "❌ Ocorreu um erro ao finalizar a conexão.\n"
+                "Tente novamente com /start."
+            ),
         )
         return ConversationHandler.END
-
-    balance = await ex.get_balance()
-    db.save_user(chat_id, private_key, proxy_wallet)
-    exe._executor_cache[chat_id] = ex
-
-    short_wallet = f"{proxy_wallet[:6]}...{proxy_wallet[-4:]}"
-
-    await ctx.bot.send_message(
-        chat_id=chat_id,
-        text=(
-            "✅ *Conta conectada com sucesso!*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🔑 Tipo:    `{wallet_label}`\n"
-            f"👛 Wallet:  `{short_wallet}`\n"
-            f"💰 Saldo:   `${balance:.2f} USDC`\n\n"
-            "📡 *Scanner ativo* — você receberá alertas a cada 5 min "
-            "quando houver oportunidade com edge ≥ 15%.\n\n"
-            "Use as configurações para ajustar tamanho e edge mínimo."
-        ),
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_menu_keyboard(connected=True),
-    )
-
-    asyncio.create_task(scan_loop(chat_id, ctx.application))
-    return ConversationHandler.END
 
 
 def _derive_proxy_wallet(private_key: str) -> str | None:
@@ -412,6 +444,9 @@ async def show_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"⏳ Pendentes:   `{len(pending)}`\n"
         f"⚙️ Tamanho/trade: `${user['trade_size']:.2f}`\n"
         f"📉 Edge mínimo:  `{user['min_edge']*100:.0f}%`\n"
+        f"🛡️ Conf. mínima: `{user.get('min_confidence', 0.55)*100:.0f}%`\n"
+        f"📦 Limite/dia:   `{int(user.get('max_daily_trades', 8))}` trades\n"
+        f"💵 Exposição/dia:`${float(user.get('max_daily_exposure', 100.0)):.0f}`\n"
         f"🔄 Scanner:      `{'Ativo' if user['active'] else 'Pausado'}`\n"
     )
 
@@ -443,6 +478,9 @@ async def show_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💵 Tamanho por trade: `${user['trade_size']:.2f}`\n"
         f"📉 Edge mínimo para alertar: `{user['min_edge']*100:.0f}%`\n"
+        f"🛡️ Confiança mínima: `{user.get('min_confidence', 0.55)*100:.0f}%`\n"
+        f"📦 Máx. trades/dia: `{int(user.get('max_daily_trades', 8))}`\n"
+        f"💵 Máx. exposição/dia: `${float(user.get('max_daily_exposure', 100.0)):.0f}`\n"
     )
 
     buttons = [
@@ -596,6 +634,40 @@ async def handle_trade_decision(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text("⚠️ Sessão expirada. Use /start.")
         return
 
+    stats = db.get_today_trade_stats(chat_id)
+    daily_count = int(user.get("max_daily_trades", 8) or 8)
+    daily_exposure = float(user.get("max_daily_exposure", 100.0) or 100.0)
+    min_conf = float(user.get("min_confidence", 0.55) or 0.55)
+
+    if opp.confidence < min_conf:
+        await query.message.edit_text(
+            f"🛡️ *Trade bloqueado por confiança*\n"
+            f"Confiança: `{opp.confidence*100:.0f}%` | Mínimo: `{min_conf*100:.0f}%`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        user_opps.pop(idx, None)
+        return
+
+    if stats["count"] >= daily_count:
+        await query.message.edit_text(
+            f"🛑 *Limite diário de trades atingido*\n"
+            f"Executados hoje: `{stats['count']}` / `{daily_count}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        user_opps.pop(idx, None)
+        return
+
+    projected = stats["exposure"] + float(user["trade_size"])
+    if projected > daily_exposure:
+        await query.message.edit_text(
+            f"🛑 *Limite diário de exposição atingido*\n"
+            f"Atual: `${stats['exposure']:.2f}` | Após trade: `${projected:.2f}`\n"
+            f"Limite: `${daily_exposure:.2f}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        user_opps.pop(idx, None)
+        return
+
     await query.message.edit_text(
         f"⏳ *Executando ordem...*\n"
         f"🌡️ {opp.city} | {opp.side} | ${user['trade_size']:.2f}",
@@ -711,7 +783,7 @@ async def toggle_scanner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text(f"Scanner {label}.")
 
     if new_state:
-        asyncio.create_task(scan_loop(chat_id, ctx.application))
+        ensure_scan_task(chat_id, ctx.application)
 
 
 async def disconnect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -721,6 +793,9 @@ async def disconnect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     db.set_user_active(chat_id, False)
     exe.clear_executor(chat_id)
+    task = _scan_tasks.pop(chat_id, None)
+    if task and not task.done():
+        task.cancel()
 
     await query.message.reply_text(
         "🔌 Conta desconectada. Use /start para reconectar.",
@@ -766,8 +841,12 @@ async def post_init(app):
     db.init_db()
     users = db.get_all_active_users()
     for user in users:
-        asyncio.create_task(scan_loop(user["chat_id"], app))
+        ensure_scan_task(user["chat_id"], app)
     log.info(f"[Init] {len(users)} usuário(s) ativo(s) com scanner iniciado.")
+
+
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    log.exception("[BotError] Exceção não tratada", exc_info=ctx.error)
 
 
 def main():
@@ -811,6 +890,8 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("ping", ping))
+    app.add_handler(MessageHandler(filters.Regex(r"(?i)^start$"), start_alias))
     app.add_handler(connect_conv)
     app.add_handler(settings_conv)
 
@@ -823,6 +904,7 @@ def main():
     app.add_handler(CallbackQueryHandler(show_howto,         pattern="^howto$"))
     app.add_handler(CallbackQueryHandler(back_to_menu,       pattern="^menu$"))
     app.add_handler(CallbackQueryHandler(handle_trade_decision, pattern="^(exec|skip)_\\d+$"))
+    app.add_error_handler(on_error)
 
     log.info("🤖 PolyWeather Bot iniciado.")
     app.run_polling(drop_pending_updates=True)

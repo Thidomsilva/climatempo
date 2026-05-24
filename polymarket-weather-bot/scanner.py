@@ -14,7 +14,8 @@ import asyncio
 import aiohttp
 import re
 import json
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -98,6 +99,9 @@ MIN_LIQUIDITY_USD  = 200    # liquidez mínima no order book
 MIN_HOURS_TO_CLOSE = 2      # horas mínimas até resolução
 MAX_HOURS_TO_CLOSE = 96     # não operar mercados muito distantes
 
+# Custos e margem operacional (fee + spread + slippage), abatidos do edge bruto.
+TRADING_COST_BUFFER = float(os.getenv("TRADING_COST_BUFFER", "0.03"))
+
 
 @dataclass
 class Opportunity:
@@ -109,13 +113,15 @@ class Opportunity:
     side:         str          # "YES" ou "NO"
     market_price: float
     model_prob:   float
-    edge:         float
+    edge:         float  # edge líquido (já descontado custo)
     unit:         str
     bucket_low:   Optional[float]
     bucket_high:  Optional[float]
     liquidity:    float = 0.0
     hours_to_close: float = 0.0
     icao:         str = ""
+    gross_edge:   float = 0.0
+    confidence:   float = 0.0
 
 
 # ─── Extração de cidade do título ─────────────────────────────────────────────
@@ -253,6 +259,22 @@ def parse_bucket(outcome_label: str, unit: str) -> tuple[Optional[float], Option
         return v - 0.5, v + 0.5
 
     return None, None
+
+
+def confidence_score(liquidity: float, hours_left: float, gross_edge: float) -> float:
+    """
+    Score de confiança de 0 a 1 combinando:
+    - liquidez (quanto maior, melhor)
+    - proximidade da resolução (evita horizonte longo)
+    - edge bruto (sinal mais forte)
+    """
+    liq_norm = max(0.0, min(1.0, (liquidity - MIN_LIQUIDITY_USD) / 1500.0))
+    edge_norm = max(0.0, min(1.0, gross_edge / 0.30))
+    # Quanto mais próximo do fechamento (mas >= mínimo), maior confiança.
+    time_window = max(1.0, MAX_HOURS_TO_CLOSE - MIN_HOURS_TO_CLOSE)
+    time_norm = 1.0 - max(0.0, min(1.0, (hours_left - MIN_HOURS_TO_CLOSE) / time_window))
+
+    return 0.40 * edge_norm + 0.35 * liq_norm + 0.25 * time_norm
 
 
 # ─── Busca de mercados na Gamma API ──────────────────────────────────────────
@@ -423,8 +445,9 @@ async def scan_opportunities(min_edge: float = 0.15) -> list["Opportunity"]:
 
                     edge = model_prob - price
                     abs_edge = abs(edge)
+                    net_edge = abs_edge - TRADING_COST_BUFFER
 
-                    if abs_edge < min_edge:
+                    if net_edge < min_edge:
                         continue
 
                     # Token ID deste outcome
@@ -445,13 +468,15 @@ async def scan_opportunities(min_edge: float = 0.15) -> list["Opportunity"]:
                         side=side,
                         market_price=trade_price,
                         model_prob=model_prob,
-                        edge=abs_edge,
+                        edge=net_edge,
                         unit=station["unit"],
                         bucket_low=low,
                         bucket_high=high,
                         liquidity=liquidity,
                         hours_to_close=hours_left,
                         icao=station["icao"],
+                        gross_edge=abs_edge,
+                        confidence=confidence_score(liquidity, hours_left, abs_edge),
                     ))
 
     # Ordena: edge desc, depois liquidez desc
@@ -481,7 +506,9 @@ def format_opportunity(opp: Opportunity) -> str:
         f"🎯 Bucket:    `{bucket}`\n"
         f"📊 Modelo:    `{opp.model_prob*100:.1f}%`\n"
         f"💹 Mercado:   `{opp.market_price*100:.1f}%`\n"
-        f"⚡ Edge:      `{opp.edge*100:.1f}%`\n"
+        f"⚡ Edge líq.: `{opp.edge*100:.1f}%`\n"
+        f"🧪 Edge bruto:`{opp.gross_edge*100:.1f}%`\n"
+        f"🛡️ Confiança: `{opp.confidence*100:.0f}%`\n"
         f"🎲 Lado:      `{opp.side}`\n"
         f"💧 Liquidez:  `{liq}`\n"
         f"⏱️ Fecha em:  `{hours}`\n"
