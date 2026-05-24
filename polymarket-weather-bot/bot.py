@@ -378,7 +378,7 @@ async def _finalize_connection(chat_id: int, private_key: str,
         balance = await ex.get_balance()
         balance_text = f"${balance:.2f} USDC" if balance is not None else "indisponível no momento"
 
-        db.save_user(chat_id, private_key, proxy_wallet)
+        db.save_user(chat_id, private_key, proxy_wallet, sig_type=sig_type)
         exe._executor_cache[chat_id] = ex
 
         short_wallet = f"{proxy_wallet[:6]}...{proxy_wallet[-4:]}"
@@ -452,7 +452,12 @@ async def show_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("⚠️ Conta não conectada. Use /start.")
             return
 
-        ex = exe.get_executor(chat_id, user["private_key"], user["proxy_wallet"])
+        ex = exe.get_executor(
+            chat_id,
+            user["private_key"],
+            user["proxy_wallet"],
+            sig_type=int(user.get("sig_type", 1) or 1),
+        )
         balance = await ex.get_balance()
         balance_text = f"${balance:.2f} USDC" if balance is not None else "indisponível no momento"
         trades  = db.get_user_trades(chat_id, limit=5)
@@ -765,7 +770,12 @@ async def handle_trade_decision(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
 
-    ex = exe.get_executor(chat_id, user["private_key"], user["proxy_wallet"])
+    ex = exe.get_executor(
+        chat_id,
+        user["private_key"],
+        user["proxy_wallet"],
+        sig_type=int(user.get("sig_type", 1) or 1),
+    )
     result = await ex.place_order(
         token_id=opp.token_id,
         side=opp.side,

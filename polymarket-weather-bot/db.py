@@ -66,6 +66,8 @@ def _ensure_user_columns(conn: sqlite3.Connection):
         c.execute("ALTER TABLE users ADD COLUMN max_daily_exposure REAL DEFAULT 100.0")
     if "min_confidence" not in existing:
         c.execute("ALTER TABLE users ADD COLUMN min_confidence REAL DEFAULT 0.55")
+    if "sig_type" not in existing:
+        c.execute("ALTER TABLE users ADD COLUMN sig_type INTEGER DEFAULT 1")
 
 
 def init_db():
@@ -76,6 +78,7 @@ def init_db():
             chat_id       INTEGER PRIMARY KEY,
             private_key   TEXT,
             proxy_wallet  TEXT,
+            sig_type      INTEGER DEFAULT 1,
             trade_size    REAL    DEFAULT 10.0,
             min_edge      REAL    DEFAULT 0.15,
             max_daily_trades   INTEGER DEFAULT 8,
@@ -107,18 +110,19 @@ def init_db():
     conn.close()
 
 
-def save_user(chat_id: int, private_key: str, proxy_wallet: str):
+def save_user(chat_id: int, private_key: str, proxy_wallet: str, sig_type: int = 1):
     encrypted_key = fernet.encrypt(private_key.encode()).decode()
     conn = _open_conn()
     c = conn.cursor()
     c.execute("""
-        INSERT INTO users (chat_id, private_key, proxy_wallet)
-        VALUES (?, ?, ?)
+        INSERT INTO users (chat_id, private_key, proxy_wallet, sig_type)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT(chat_id) DO UPDATE SET
             private_key=excluded.private_key,
             proxy_wallet=excluded.proxy_wallet,
+            sig_type=excluded.sig_type,
             active=1
-    """, (chat_id, encrypted_key, proxy_wallet))
+    """, (chat_id, encrypted_key, proxy_wallet, int(sig_type)))
     conn.commit()
     conn.close()
 
@@ -132,7 +136,7 @@ def get_user(chat_id: int) -> dict | None:
     if not row:
         return None
     keys = [
-        "chat_id", "private_key", "proxy_wallet", "trade_size", "min_edge",
+        "chat_id", "private_key", "proxy_wallet", "sig_type", "trade_size", "min_edge",
         "max_daily_trades", "max_daily_exposure", "min_confidence",
         "active", "created_at",
     ]
@@ -191,7 +195,7 @@ def get_all_active_users() -> list[dict]:
     rows = c.fetchall()
     conn.close()
     keys = [
-        "chat_id", "private_key", "proxy_wallet", "trade_size", "min_edge",
+        "chat_id", "private_key", "proxy_wallet", "sig_type", "trade_size", "min_edge",
         "max_daily_trades", "max_daily_exposure", "min_confidence",
         "active", "created_at",
     ]

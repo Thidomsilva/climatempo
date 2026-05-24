@@ -690,10 +690,27 @@ class PolymarketExecutor:
 _executor_cache: dict[int, PolymarketExecutor] = {}
 
 
-def get_executor(chat_id: int, private_key: str, proxy_wallet: str) -> PolymarketExecutor:
+def get_executor(
+    chat_id: int,
+    private_key: str,
+    proxy_wallet: str,
+    sig_type: int = 1,
+) -> PolymarketExecutor:
     """Retorna executor cacheado ou cria um novo."""
-    if chat_id not in _executor_cache:
-        _executor_cache[chat_id] = PolymarketExecutor(private_key, proxy_wallet)
+    cached = _executor_cache.get(chat_id)
+    if cached:
+        if (
+            cached.private_key == private_key
+            and cached.proxy_wallet == proxy_wallet
+            and int(cached.sig_type) == int(sig_type)
+        ):
+            return cached
+
+    _executor_cache[chat_id] = PolymarketExecutor(
+        private_key,
+        proxy_wallet,
+        sig_type=int(sig_type),
+    )
     return _executor_cache[chat_id]
 
 
