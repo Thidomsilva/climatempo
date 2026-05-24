@@ -237,8 +237,26 @@ class PolymarketExecutor:
             norm_size = float(
                 Decimal(str(size)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             )
+            # `size` recebido do bot está em USDC (notional).
+            # Para ordem limite, a CLOB espera quantidade do token (shares).
+            token_size = float(
+                Decimal(str(norm_size / norm_price)).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+            )
+            token_size = max(0.01, token_size)
 
             current_token_id = token_id
+
+            # NO tem apresentado mais mismatch; tenta primeiro ordem de mercado por notional.
+            if (side or "").strip().upper() == "NO":
+                market_result = self._try_native_market_order(
+                    token_id=current_token_id,
+                    amount_usdc=norm_size,
+                    preferred_price=norm_price,
+                )
+                if market_result is not None:
+                    return market_result
 
             attempts = _get_order_retry_max_attempts()
             # Alguns mercados exigem versão de ordem com neg_risk=True.
@@ -266,7 +284,7 @@ class PolymarketExecutor:
                                 order_args = OrderArgs(
                                     token_id=current_token_id,
                                     price=norm_price,
-                                    size=norm_size,
+                                    size=token_size,
                                     side=order_side,
                                 )
                                 signed_order = self._clob_client.create_order(order_args, options)
@@ -318,7 +336,7 @@ class PolymarketExecutor:
                         order_id=None,
                         error=(
                             f"{type(e).__name__}: {e} "
-                            f"(side={side}, token={current_token_id}, price={norm_price}, size={norm_size})"
+                            f"(side={side}, token={current_token_id}, price={norm_price}, size={norm_size}, token_size={token_size})"
                         ),
                     )
 
@@ -353,7 +371,7 @@ class PolymarketExecutor:
                     order_id=None,
                     error=(
                         f"{err_msg} "
-                        f"(side={side}, token={current_token_id}, price={norm_price}, size={norm_size}, "
+                        f"(side={side}, token={current_token_id}, price={norm_price}, size={norm_size}, token_size={token_size}, "
                         f"neg_risk={used_neg_risk}, order_type={used_order_type})"
                     ),
                 )
@@ -364,7 +382,7 @@ class PolymarketExecutor:
                     token_id=current_token_id,
                     order_side=order_side,
                     price=norm_price,
-                    size=norm_size,
+                    size=token_size,
                 )
                 if native_result is not None:
                     return native_result
@@ -385,7 +403,7 @@ class PolymarketExecutor:
                 order_id=None,
                 error=(
                     "Ordem rejeitada apos retries por order_version_mismatch "
-                    f"(side={side}, token={current_token_id}, price={norm_price}, size={norm_size})"
+                    f"(side={side}, token={current_token_id}, price={norm_price}, size={norm_size}, token_size={token_size})"
                 ),
             )
 
