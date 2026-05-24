@@ -9,12 +9,28 @@ import hashlib
 import hmac
 import time
 import json
+import os
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 from dataclasses import dataclass
 
 CLOB_HOST = "https://clob.polymarket.com"
 CHAIN_ID  = 137  # Polygon
+
+
+def _get_order_retry_max_attempts() -> int:
+    """Retorna quantidade de tentativas de envio de ordem (mínimo 1)."""
+    raw = os.getenv("ORDER_RETRY_MAX_ATTEMPTS", "3")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 3
+
+
+def _is_order_version_mismatch_error(err: object) -> bool:
+    """Detecta rejeição transitória de versão de ordem da CLOB."""
+    text = str(err).lower()
+    return "order_version_mismatch" in text
 
 
 @dataclass
@@ -217,22 +233,40 @@ class PolymarketExecutor:
                 neg_risk=False,
             )
 
-            signed_order = self._clob_client.create_order(order_args, options)
-            resp = self._clob_client.post_order(signed_order, "FOK")
+            attempts = _get_order_retry_max_attempts()
+            for attempt in range(1, attempts + 1):
+                try:
+                    # Recria a ordem em cada tentativa para obter versão/timestamp atualizados.
+                    signed_order = self._clob_client.create_order(order_args, options)
+                    resp = self._clob_client.post_order(signed_order, "FOK")
+                except Exception as e:
+                    if _is_order_version_mismatch_error(e) and attempt < attempts:
+                        time.sleep(0.25 * attempt)
+                        continue
+                    return OrderResult(
+                        success=False,
+                        order_id=None,
+                        error=f"{type(e).__name__}: {e}",
+                    )
 
-            if resp and resp.get("success"):
-                return OrderResult(
-                    success=True,
-                    order_id=resp.get("orderID", ""),
-                    error=None,
-                    size_filled=float(resp.get("sizeFilled", size)),
-                    price_avg=float(resp.get("price", price)),
-                )
-            else:
+                if resp and resp.get("success"):
+                    return OrderResult(
+                        success=True,
+                        order_id=resp.get("orderID", ""),
+                        error=None,
+                        size_filled=float(resp.get("sizeFilled", size)),
+                        price_avg=float(resp.get("price", price)),
+                    )
+
                 if isinstance(resp, dict):
                     err_msg = resp.get("errorMsg") or resp.get("error") or "Ordem rejeitada"
                 else:
                     err_msg = f"Resposta inválida da CLOB: {resp}"
+
+                if _is_order_version_mismatch_error(err_msg) and attempt < attempts:
+                    time.sleep(0.25 * attempt)
+                    continue
+
                 return OrderResult(
                     success=False,
                     order_id=None,
@@ -241,6 +275,15 @@ class PolymarketExecutor:
                         f"(side={side}, token={token_id}, price={norm_price}, size={norm_size})"
                     ),
                 )
+
+            return OrderResult(
+                success=False,
+                order_id=None,
+                error=(
+                    "Ordem rejeitada apos retries por order_version_mismatch "
+                    f"(side={side}, token={token_id}, price={norm_price}, size={norm_size})"
+                ),
+            )
 
         except Exception as e:
             return OrderResult(
