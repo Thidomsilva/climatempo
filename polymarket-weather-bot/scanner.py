@@ -96,8 +96,8 @@ WU_HISTORY = "https://api.weather.com/v1/location/{icao}:9:US/observations/histo
 
 # Filtros de qualidade
 MIN_LIQUIDITY_USD  = 200    # liquidez mínima no order book
-MIN_HOURS_TO_CLOSE = 2      # horas mínimas até resolução
-MAX_HOURS_TO_CLOSE = 96     # não operar mercados muito distantes
+MIN_HOURS_TO_CLOSE = float(os.getenv("MIN_HOURS_TO_CLOSE", "0.5"))
+MAX_HOURS_TO_CLOSE = float(os.getenv("MAX_HOURS_TO_CLOSE", "48"))
 
 # Custos e margem operacional (fee + spread + slippage), abatidos do edge bruto.
 TRADING_COST_BUFFER = float(os.getenv("TRADING_COST_BUFFER", "0.03"))
@@ -732,17 +732,16 @@ async def get_market_monitoring_snapshot(limit_questions: int = 8) -> dict:
             city_display = city_key.title()
             city_counts[city_display] = city_counts.get(city_display, 0) + 1
 
-            target_date = extract_target_date(
-                question,
-                market.get("endDate") or market.get("end_date_iso"),
-            )
-            if target_date:
-                date_key = target_date.isoformat()
-                date_counts[date_key] = date_counts.get(date_key, 0) + 1
-
             ok, _, hours_left = passes_quality_filters(market)
             if ok:
                 snapshot["monitorable_markets"] += 1
+                target_date = extract_target_date(
+                    question,
+                    market.get("endDate") or market.get("end_date_iso"),
+                )
+                if target_date:
+                    date_key = target_date.isoformat()
+                    date_counts[date_key] = date_counts.get(date_key, 0) + 1
                 if target_date:
                     samples.append((hours_left, target_date.isoformat(), question))
                 else:

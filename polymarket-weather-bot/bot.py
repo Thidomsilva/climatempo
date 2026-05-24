@@ -611,7 +611,7 @@ async def scan_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sent_count = await send_opportunities(chat_id, opps, user, ctx.application)
     if sent_count == 0:
         await msg.edit_text(
-            "🔁 Há oportunidades abertas, mas já foram enviadas recentemente."
+            "🔁 Há oportunidades abertas, mas nenhuma elegível agora (cooldown/confiança)."
         )
         return
 
@@ -633,6 +633,7 @@ def opportunity_signature(opp) -> str:
 async def send_opportunities(chat_id: int, opps: list, user: dict, app) -> int:
     """Envia oportunidades para aprovação, com deduplicação e cooldown."""
     _pending_opps[chat_id] = {}
+    min_conf = float(user.get("min_confidence", 0.55) or 0.55)
 
     now = asyncio.get_running_loop().time()
     recent = _recent_alerts.setdefault(chat_id, {})
@@ -645,6 +646,10 @@ async def send_opportunities(chat_id: int, opps: list, user: dict, app) -> int:
     seen_batch: set[str] = set()
 
     for opp in opps:
+        # Evita enviar card que será bloqueado no clique por confiança.
+        if opp.confidence < min_conf:
+            continue
+
         sig = opportunity_signature(opp)
         if sig in seen_batch:
             continue
