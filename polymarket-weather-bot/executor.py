@@ -49,6 +49,11 @@ def _order_type_candidates() -> tuple[str, ...]:
     return tuple(allowed) if allowed else ("FOK", "GTC")
 
 
+def _is_extreme_price(price: float) -> bool:
+    """Evita operar nos extremos onde a CLOB tende a rejeitar por mismatch."""
+    return price <= 0.02 or price >= 0.98
+
+
 @dataclass
 class OrderResult:
     success:   bool
@@ -216,7 +221,7 @@ class PolymarketExecutor:
                     price_avg=price,
                 )
 
-            from py_clob_client.clob_types import OrderArgs, PartialCreateOrderOptions
+            from py_clob_client.clob_types import OrderArgs
             from py_clob_client.order_builder.constants import BUY
 
             # Operação long-only: YES/NO significa qual token comprar.
@@ -234,6 +239,15 @@ class PolymarketExecutor:
                 Decimal(str(price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             )
             norm_price = max(0.01, min(0.99, norm_price))
+            if _is_extreme_price(norm_price):
+                return OrderResult(
+                    success=False,
+                    order_id=None,
+                    error=(
+                        f"Preco fora da faixa operavel ({norm_price:.2f}). "
+                        "Mercado pode estar em estado extremo/proximo da resolucao."
+                    ),
+                )
             norm_size = float(
                 Decimal(str(size)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             )
@@ -259,14 +273,10 @@ class PolymarketExecutor:
                     return market_result
 
             attempts = _get_order_retry_max_attempts()
-            # Alguns mercados exigem versão de ordem com neg_risk=True.
-            # Tentamos ambos para lidar com order_version_mismatch de forma robusta.
-            neg_risk_candidates = (False, True)
             order_type_candidates = _order_type_candidates()
             fallback_debug: list[str] = []
 
             for attempt in range(1, attempts + 1):
-                used_neg_risk = None
                 used_order_type = None
                 live_price = self._resolve_live_limit_price(
                     token_id=current_token_id,
@@ -284,32 +294,24 @@ class PolymarketExecutor:
                     resp = None
                     last_exc: Exception | None = None
 
-                    for neg_risk in neg_risk_candidates:
-                        used_neg_risk = neg_risk
-                        options = PartialCreateOrderOptions(
-                            tick_size="0.01",
-                            neg_risk=neg_risk,
-                        )
-                        for order_type in order_type_candidates:
-                            used_order_type = order_type
-                            try:
-                                order_args = OrderArgs(
-                                    token_id=current_token_id,
-                                    price=live_price,
-                                    size=live_token_size,
-                                    side=order_side,
-                                )
-                                signed_order = self._clob_client.create_order(order_args, options)
-                                resp = self._clob_client.post_order(signed_order, order_type)
-                                break
-                            except Exception as e:
-                                last_exc = e
-                                if _is_order_version_mismatch_error(e):
-                                    continue
-                                raise
-
-                        if resp is not None:
+                    for order_type in order_type_candidates:
+                        used_order_type = order_type
+                        try:
+                            order_args = OrderArgs(
+                                token_id=current_token_id,
+                                price=live_price,
+                                size=live_token_size,
+                                side=order_side,
+                            )
+                            # Sem options customizadas: a própria biblioteca resolve tick/neg_risk.
+                            signed_order = self._clob_client.create_order(order_args)
+                            resp = self._clob_client.post_order(signed_order, order_type)
                             break
+                        except Exception as e:
+                            last_exc = e
+                            if _is_order_version_mismatch_error(e):
+                                continue
+                            raise
 
                     if resp is None and last_exc is not None:
                         raise last_exc
@@ -388,7 +390,7 @@ class PolymarketExecutor:
                     error=(
                         f"{err_msg} "
                         f"(side={side}, token={current_token_id}, price={live_price}, size={norm_size}, token_size={live_token_size}, "
-                        f"neg_risk={used_neg_risk}, order_type={used_order_type})"
+                        f"order_type={used_order_type})"
                     ),
                 )
 
@@ -450,6 +452,8 @@ class PolymarketExecutor:
     ) -> Optional[OrderResult]:
         """Tenta o fluxo nativo do client sem opções customizadas."""
         try:
+            from py_clob_client.clob_types import OrderArgs
+
             fallback_args = OrderArgs(
                 token_id=token_id,
                 price=price,
