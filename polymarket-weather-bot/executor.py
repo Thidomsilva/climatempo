@@ -232,18 +232,36 @@ class PolymarketExecutor:
                 side=order_side,
             )
 
-            # FOK: Fill or Kill — executa tudo ou cancela
-            options = PartialCreateOrderOptions(
-                tick_size="0.01",
-                neg_risk=False,
-            )
-
             attempts = _get_order_retry_max_attempts()
+            # Alguns mercados exigem versão de ordem com neg_risk=True.
+            # Tentamos ambos para lidar com order_version_mismatch de forma robusta.
+            neg_risk_candidates = (False, True)
+
             for attempt in range(1, attempts + 1):
+                used_neg_risk = None
                 try:
                     # Recria a ordem em cada tentativa para obter versão/timestamp atualizados.
-                    signed_order = self._clob_client.create_order(order_args, options)
-                    resp = self._clob_client.post_order(signed_order, "FOK")
+                    resp = None
+                    last_exc: Exception | None = None
+
+                    for neg_risk in neg_risk_candidates:
+                        used_neg_risk = neg_risk
+                        options = PartialCreateOrderOptions(
+                            tick_size="0.01",
+                            neg_risk=neg_risk,
+                        )
+                        try:
+                            signed_order = self._clob_client.create_order(order_args, options)
+                            resp = self._clob_client.post_order(signed_order, "FOK")
+                            break
+                        except Exception as e:
+                            last_exc = e
+                            if _is_order_version_mismatch_error(e):
+                                continue
+                            raise
+
+                    if resp is None and last_exc is not None:
+                        raise last_exc
                 except Exception as e:
                     if _is_order_version_mismatch_error(e) and attempt < attempts:
                         # Em mismatch recorrente, renovar sessão ajuda a alinhar versão/nonce.
@@ -280,7 +298,8 @@ class PolymarketExecutor:
                     order_id=None,
                     error=(
                         f"{err_msg} "
-                        f"(side={side}, token={token_id}, price={norm_price}, size={norm_size})"
+                        f"(side={side}, token={token_id}, price={norm_price}, size={norm_size}, "
+                        f"neg_risk={used_neg_risk})"
                     ),
                 )
 
