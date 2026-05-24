@@ -1,7 +1,7 @@
 # requirements.txt — PolyWeather Telegram Bot
 
 # Telegram
-python-telegram-bot==20.7
+python-telegram-bot==22.7
 
 # HTTP assíncrono
 aiohttp==3.9.3
