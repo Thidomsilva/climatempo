@@ -59,6 +59,23 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 python bot.py
 ```
 
+### 5. Operacao com comando unico (recomendado)
+
+```bash
+chmod +x botctl.sh
+./botctl.sh start
+./botctl.sh status
+./botctl.sh logs
+```
+
+Comandos disponiveis:
+
+- `./botctl.sh start` inicia em background
+- `./botctl.sh stop` para o bot
+- `./botctl.sh restart` reinicia
+- `./botctl.sh status` mostra status e PID
+- `./botctl.sh logs` acompanha o log em tempo real
+
 ---
 
 ## Uso pelo usuário no Telegram

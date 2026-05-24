@@ -16,4 +16,5 @@
 
 # Logs and OS files
 **/*.log
+**/.bot.pid
 .DS_Store

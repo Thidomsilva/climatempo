@@ -6,6 +6,7 @@ Menu completo: conectar conta, configurações, aprovar trades, histórico
 import asyncio
 import logging
 import os
+import time
 from dotenv import load_dotenv
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -34,6 +35,8 @@ log = logging.getLogger(__name__)
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "SEU_TOKEN_AQUI")
+POLLING_RESTART_DELAY_SEC = int(os.getenv("POLLING_RESTART_DELAY_SEC", "10"))
+POLLING_RESTART_MAX_DELAY_SEC = int(os.getenv("POLLING_RESTART_MAX_DELAY_SEC", "120"))
 
 # ─── Estados da ConversationHandler ───────────────────────────────────────────
 WAITING_PRIVATE_KEY  = 1
@@ -944,9 +947,7 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     log.exception("[BotError] Exceção não tratada", exc_info=ctx.error)
 
 
-def main():
-    db.init_db()
-
+def build_application() -> Application:
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
     # ConversationHandler para conexão da conta
@@ -1001,8 +1002,39 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_trade_decision, pattern="^(exec|skip)_\\d+$"))
     app.add_error_handler(on_error)
 
-    log.info("🤖 PolyWeather Bot iniciado.")
-    app.run_polling(drop_pending_updates=True)
+    return app
+
+
+def main():
+    db.init_db()
+
+    delay_sec = max(1, POLLING_RESTART_DELAY_SEC)
+    max_delay_sec = max(delay_sec, POLLING_RESTART_MAX_DELAY_SEC)
+
+    while True:
+        app = build_application()
+
+        try:
+            log.info("🤖 PolyWeather Bot iniciado.")
+            app.run_polling(drop_pending_updates=True, close_loop=False)
+            log.warning(
+                "[Main] Polling encerrou sem exceção. Reiniciando em %ss.",
+                delay_sec,
+            )
+            time.sleep(delay_sec)
+        except KeyboardInterrupt:
+            log.info("[Main] Encerrado manualmente.")
+            break
+        except Exception:
+            log.exception(
+                "[Main] Falha no polling. Reiniciando em %ss.",
+                delay_sec,
+            )
+            time.sleep(delay_sec)
+            delay_sec = min(delay_sec * 2, max_delay_sec)
+        else:
+            # Se voltou a rodar, volta ao delay base para próximos incidentes.
+            delay_sec = max(1, POLLING_RESTART_DELAY_SEC)
 
 
 if __name__ == "__main__":
