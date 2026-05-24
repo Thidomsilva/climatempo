@@ -158,7 +158,14 @@ class PolymarketExecutor:
             )
             return result
         except Exception as e:
-            return OrderResult(success=False, order_id=None, error=str(e))
+            return OrderResult(
+                success=False,
+                order_id=None,
+                error=(
+                    f"{type(e).__name__}: {e} "
+                    f"(side={side}, token={token_id}, price={price}, size={size})"
+                ),
+            )
 
     def _sync_place_order(self, token_id: str, side: str,
                           price: float, size: float) -> OrderResult:
@@ -206,7 +213,7 @@ class PolymarketExecutor:
 
             # FOK: Fill or Kill — executa tudo ou cancela
             options = PartialCreateOrderOptions(
-                tick_size=0.01,
+                tick_size="0.01",
                 neg_risk=False,
             )
 
@@ -222,10 +229,17 @@ class PolymarketExecutor:
                     price_avg=float(resp.get("price", price)),
                 )
             else:
+                if isinstance(resp, dict):
+                    err_msg = resp.get("errorMsg") or resp.get("error") or "Ordem rejeitada"
+                else:
+                    err_msg = f"Resposta inválida da CLOB: {resp}"
                 return OrderResult(
                     success=False,
                     order_id=None,
-                    error=resp.get("errorMsg", "Ordem rejeitada"),
+                    error=(
+                        f"{err_msg} "
+                        f"(side={side}, token={token_id}, price={norm_price}, size={norm_size})"
+                    ),
                 )
 
         except Exception as e:
