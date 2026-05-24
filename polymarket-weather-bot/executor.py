@@ -284,6 +284,15 @@ class PolymarketExecutor:
                     if resp is None and last_exc is not None:
                         raise last_exc
                 except Exception as e:
+                    native_result = self._try_native_create_and_post_order(
+                        token_id=current_token_id,
+                        order_side=order_side,
+                        price=norm_price,
+                        size=norm_size,
+                    ) if _is_order_version_mismatch_error(e) else None
+                    if native_result is not None:
+                        return native_result
+
                     if _is_order_version_mismatch_error(e) and attempt < attempts:
                         # Em mismatch recorrente, renovar sessão ajuda a alinhar versão/nonce.
                         self._sync_refresh_order_session()
@@ -299,7 +308,10 @@ class PolymarketExecutor:
                     return OrderResult(
                         success=False,
                         order_id=None,
-                        error=f"{type(e).__name__}: {e}",
+                        error=(
+                            f"{type(e).__name__}: {e} "
+                            f"(side={side}, token={current_token_id}, price={norm_price}, size={norm_size})"
+                        ),
                     )
 
                 if resp and resp.get("success"):
@@ -340,21 +352,14 @@ class PolymarketExecutor:
 
             # Última tentativa no caminho nativo do client (GTC + auto-resolve interno).
             try:
-                fallback_args = OrderArgs(
+                native_result = self._try_native_create_and_post_order(
                     token_id=current_token_id,
+                    order_side=order_side,
                     price=norm_price,
                     size=norm_size,
-                    side=order_side,
                 )
-                fallback_resp = self._clob_client.create_and_post_order(fallback_args)
-                if fallback_resp and fallback_resp.get("success"):
-                    return OrderResult(
-                        success=True,
-                        order_id=fallback_resp.get("orderID", ""),
-                        error=None,
-                        size_filled=float(fallback_resp.get("sizeFilled", size)),
-                        price_avg=float(fallback_resp.get("price", price)),
-                    )
+                if native_result is not None:
+                    return native_result
             except Exception as e:
                 # Mantém erro detalhado no retorno final abaixo.
                 pass
@@ -382,6 +387,34 @@ class PolymarketExecutor:
         except Exception:
             # Melhor esforço: o fluxo principal ainda decide sucesso/falha da ordem.
             return
+
+    def _try_native_create_and_post_order(
+        self,
+        token_id: str,
+        order_side: str,
+        price: float,
+        size: float,
+    ) -> Optional[OrderResult]:
+        """Tenta o fluxo nativo do client sem opções customizadas."""
+        try:
+            fallback_args = OrderArgs(
+                token_id=token_id,
+                price=price,
+                size=size,
+                side=order_side,
+            )
+            fallback_resp = self._clob_client.create_and_post_order(fallback_args)
+            if fallback_resp and fallback_resp.get("success"):
+                return OrderResult(
+                    success=True,
+                    order_id=fallback_resp.get("orderID", ""),
+                    error=None,
+                    size_filled=float(fallback_resp.get("sizeFilled", size)),
+                    price_avg=float(fallback_resp.get("price", price)),
+                )
+            return None
+        except Exception:
+            return None
 
     def _refresh_token_id_from_market(
         self,
