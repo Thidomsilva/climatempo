@@ -293,6 +293,14 @@ class PolymarketExecutor:
                     if native_result is not None:
                         return native_result
 
+                    market_result = self._try_native_market_order(
+                        token_id=current_token_id,
+                        amount_usdc=norm_size,
+                        preferred_price=norm_price,
+                    ) if _is_order_version_mismatch_error(e) else None
+                    if market_result is not None:
+                        return market_result
+
                     if _is_order_version_mismatch_error(e) and attempt < attempts:
                         # Em mismatch recorrente, renovar sessão ajuda a alinhar versão/nonce.
                         self._sync_refresh_order_session()
@@ -360,6 +368,14 @@ class PolymarketExecutor:
                 )
                 if native_result is not None:
                     return native_result
+
+                market_result = self._try_native_market_order(
+                    token_id=current_token_id,
+                    amount_usdc=norm_size,
+                    preferred_price=norm_price,
+                )
+                if market_result is not None:
+                    return market_result
             except Exception as e:
                 # Mantém erro detalhado no retorno final abaixo.
                 pass
@@ -412,6 +428,38 @@ class PolymarketExecutor:
                     size_filled=float(fallback_resp.get("sizeFilled", size)),
                     price_avg=float(fallback_resp.get("price", price)),
                 )
+            return None
+        except Exception:
+            return None
+
+    def _try_native_market_order(
+        self,
+        token_id: str,
+        amount_usdc: float,
+        preferred_price: float,
+    ) -> Optional[OrderResult]:
+        """Tenta ordem de mercado nativa (amount em USDC)."""
+        try:
+            from py_clob_client.clob_types import MarketOrderArgs
+
+            # amount é em colateral (USDC), alinhado com trade_size do bot.
+            market_args = MarketOrderArgs(
+                token_id=token_id,
+                amount=float(amount_usdc),
+                price=float(preferred_price),
+            )
+            signed = self._clob_client.create_market_order(market_args)
+
+            for order_type in ("FOK", "GTC"):
+                resp = self._clob_client.post_order(signed, order_type)
+                if resp and resp.get("success"):
+                    return OrderResult(
+                        success=True,
+                        order_id=resp.get("orderID", ""),
+                        error=None,
+                        size_filled=float(resp.get("sizeFilled", 0.0)),
+                        price_avg=float(resp.get("price", preferred_price)),
+                    )
             return None
         except Exception:
             return None
