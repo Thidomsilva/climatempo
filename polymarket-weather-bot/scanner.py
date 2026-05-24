@@ -473,6 +473,50 @@ def extract_yes_price(market: dict, outcomes: list, prices_raw) -> Optional[floa
     return None
 
 
+def resolve_binary_token_id(market: dict, outcomes: list, side: str) -> str:
+    """Resolve token YES/NO em mercado binário priorizando mapeamento explícito."""
+    side_norm = (side or "YES").strip().upper()
+
+    # 1) Preferir `tokens` com outcome explícito (evita inversão por índice).
+    tokens_raw = market.get("tokens", [])
+    try:
+        tokens = json.loads(tokens_raw) if isinstance(tokens_raw, str) else tokens_raw
+    except Exception:
+        tokens = []
+
+    if isinstance(tokens, list):
+        wanted = "yes" if side_norm == "YES" else "no"
+        for item in tokens:
+            if not isinstance(item, dict):
+                continue
+            outcome = str(item.get("outcome", "")).strip().lower()
+            if outcome != wanted:
+                continue
+            tok = item.get("token_id") or item.get("tokenId") or item.get("id")
+            if tok:
+                return str(tok)
+
+    # 2) Fallback para `clobTokenIds` por índice se outcomes estiverem no padrão Yes/No.
+    try:
+        token_ids_raw = market.get("clobTokenIds", "[]")
+        token_ids = json.loads(token_ids_raw) if isinstance(token_ids_raw, str) else token_ids_raw
+    except Exception:
+        token_ids = []
+
+    if (
+        isinstance(outcomes, list)
+        and len(outcomes) >= 2
+        and str(outcomes[0]).strip().lower() == "yes"
+        and isinstance(token_ids, list)
+    ):
+        if side_norm == "YES" and len(token_ids) >= 1:
+            return str(token_ids[0])
+        if side_norm == "NO" and len(token_ids) >= 2:
+            return str(token_ids[1])
+
+    return ""
+
+
 # ─── Filtros de qualidade ────────────────────────────────────────────────────
 
 def passes_quality_filters(market: dict) -> tuple[bool, float, float]:
@@ -618,11 +662,7 @@ async def scan_opportunities(min_edge: float = 0.15) -> list["Opportunity"]:
                     side = "YES" if edge > 0 else "NO"
                     trade_price = yes_price if side == "YES" else (1 - yes_price)
 
-                    # Em mercado binário, NO usa o segundo token (quando disponível).
-                    if side == "YES":
-                        token_id = token_ids[0] if len(token_ids) >= 1 else ""
-                    else:
-                        token_id = token_ids[1] if len(token_ids) >= 2 else ""
+                    token_id = resolve_binary_token_id(market, outcomes, side)
                     if not token_id:
                         continue
 

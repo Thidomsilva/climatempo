@@ -521,6 +521,8 @@ class PolymarketExecutor:
             outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
             token_ids_raw = market.get("clobTokenIds", [])
             token_ids = json.loads(token_ids_raw) if isinstance(token_ids_raw, str) else token_ids_raw
+            tokens_raw = market.get("tokens", [])
+            tokens = json.loads(tokens_raw) if isinstance(tokens_raw, str) else tokens_raw
         except Exception:
             return None
 
@@ -528,6 +530,19 @@ class PolymarketExecutor:
             return None
 
         side_norm = (side or "YES").strip().upper()
+
+        # Fonte preferida: mapeamento explícito outcome -> token em `tokens`.
+        if isinstance(tokens, list) and tokens:
+            wanted = "yes" if side_norm == "YES" else "no"
+            for item in tokens:
+                if not isinstance(item, dict):
+                    continue
+                outcome = str(item.get("outcome", "")).strip().lower()
+                if outcome != wanted:
+                    continue
+                tok = item.get("token_id") or item.get("tokenId") or item.get("id")
+                if tok:
+                    return str(tok)
 
         if (
             isinstance(outcomes, list)
