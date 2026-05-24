@@ -708,6 +708,7 @@ async def get_market_monitoring_snapshot(limit_questions: int = 8) -> dict:
         "parseable_markets": 0,
         "monitorable_markets": 0,
         "cities": [],
+        "dates": [],
         "sample_questions": [],
     }
 
@@ -716,7 +717,8 @@ async def get_market_monitoring_snapshot(limit_questions: int = 8) -> dict:
         snapshot["total_markets"] = len(markets)
 
         city_counts: dict[str, int] = {}
-        samples: list[tuple[float, str]] = []
+        date_counts: dict[str, int] = {}
+        samples: list[tuple[float, str, str]] = []
 
         for market in markets:
             question = (market.get("question") or "").strip()
@@ -730,16 +732,34 @@ async def get_market_monitoring_snapshot(limit_questions: int = 8) -> dict:
             city_display = city_key.title()
             city_counts[city_display] = city_counts.get(city_display, 0) + 1
 
+            target_date = extract_target_date(
+                question,
+                market.get("endDate") or market.get("end_date_iso"),
+            )
+            if target_date:
+                date_key = target_date.isoformat()
+                date_counts[date_key] = date_counts.get(date_key, 0) + 1
+
             ok, _, hours_left = passes_quality_filters(market)
             if ok:
                 snapshot["monitorable_markets"] += 1
-                samples.append((hours_left, question))
+                if target_date:
+                    samples.append((hours_left, target_date.isoformat(), question))
+                else:
+                    samples.append((hours_left, "n/a", question))
 
         top_cities = sorted(city_counts.items(), key=lambda it: it[1], reverse=True)
         snapshot["cities"] = top_cities[:8]
 
+        # Datas com mais mercados (normalmente hoje e próximos dias).
+        top_dates = sorted(date_counts.items(), key=lambda it: (it[0], -it[1]))
+        snapshot["dates"] = top_dates[:8]
+
         samples.sort(key=lambda it: it[0])
-        snapshot["sample_questions"] = [q for _, q in samples[:limit_questions]]
+        snapshot["sample_questions"] = [
+            {"target_date": d, "question": q}
+            for _, d, q in samples[:limit_questions]
+        ]
 
     return snapshot
 
@@ -758,12 +778,22 @@ def format_market_snapshot(snapshot: dict) -> str:
         city_text = ", ".join([f"{city} ({count})" for city, count in cities[:6]])
         lines.append(f"- Cidades mais frequentes: {city_text}")
 
+    dates = snapshot.get("dates") or []
+    if dates:
+        dates_text = ", ".join([f"{d} ({count})" for d, count in dates[:6]])
+        lines.append(f"- Datas encontradas: {dates_text}")
+
     sample_questions = snapshot.get("sample_questions") or []
     if sample_questions:
         lines.append("")
         lines.append("Exemplos de mercados ativos:")
-        for q in sample_questions[:5]:
-            lines.append(f"- {q[:90]}")
+        for item in sample_questions[:5]:
+            if isinstance(item, dict):
+                q = (item.get("question") or "")[:90]
+                d = item.get("target_date") or "n/a"
+                lines.append(f"- [{d}] {q}")
+            else:
+                lines.append(f"- {str(item)[:90]}")
 
     return "\n".join(lines)
 
