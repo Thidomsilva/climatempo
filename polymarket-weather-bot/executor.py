@@ -10,12 +10,15 @@ import hmac
 import time
 import json
 import os
+import urllib.parse
+import urllib.request
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 from dataclasses import dataclass
 
 CLOB_HOST = "https://clob.polymarket.com"
 CHAIN_ID  = 137  # Polygon
+GAMMA_API = "https://gamma-api.polymarket.com"
 
 
 def _get_order_retry_max_attempts() -> int:
@@ -169,6 +172,7 @@ class PolymarketExecutor:
         side: str,
         price: float,
         size: float,
+        market_id: Optional[str] = None,
     ) -> OrderResult:
         """
         Envia uma ordem FOK (Fill or Kill) na Polymarket.
@@ -183,7 +187,7 @@ class PolymarketExecutor:
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self._sync_place_order(token_id, side, price, size)
+                lambda: self._sync_place_order(token_id, side, price, size, market_id)
             )
             return result
         except Exception as e:
@@ -197,7 +201,8 @@ class PolymarketExecutor:
             )
 
     def _sync_place_order(self, token_id: str, side: str,
-                          price: float, size: float) -> OrderResult:
+                          price: float, size: float,
+                          market_id: Optional[str] = None) -> OrderResult:
         """Criação síncrona da ordem."""
         try:
             if getattr(self, "_simulation_mode", False):
@@ -233,12 +238,7 @@ class PolymarketExecutor:
                 Decimal(str(size)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             )
 
-            order_args = OrderArgs(
-                token_id=token_id,
-                price=norm_price,
-                size=norm_size,
-                side=order_side,
-            )
+            current_token_id = token_id
 
             attempts = _get_order_retry_max_attempts()
             # Alguns mercados exigem versão de ordem com neg_risk=True.
@@ -263,6 +263,12 @@ class PolymarketExecutor:
                         for order_type in order_type_candidates:
                             used_order_type = order_type
                             try:
+                                order_args = OrderArgs(
+                                    token_id=current_token_id,
+                                    price=norm_price,
+                                    size=norm_size,
+                                    side=order_side,
+                                )
                                 signed_order = self._clob_client.create_order(order_args, options)
                                 resp = self._clob_client.post_order(signed_order, order_type)
                                 break
@@ -281,6 +287,13 @@ class PolymarketExecutor:
                     if _is_order_version_mismatch_error(e) and attempt < attempts:
                         # Em mismatch recorrente, renovar sessão ajuda a alinhar versão/nonce.
                         self._sync_refresh_order_session()
+                        refreshed_token = self._refresh_token_id_from_market(
+                            market_id=market_id,
+                            side=side,
+                            current_token_id=current_token_id,
+                        )
+                        if refreshed_token:
+                            current_token_id = refreshed_token
                         time.sleep(_retry_backoff_seconds(attempt))
                         continue
                     return OrderResult(
@@ -305,6 +318,13 @@ class PolymarketExecutor:
 
                 if _is_order_version_mismatch_error(err_msg) and attempt < attempts:
                     self._sync_refresh_order_session()
+                    refreshed_token = self._refresh_token_id_from_market(
+                        market_id=market_id,
+                        side=side,
+                        current_token_id=current_token_id,
+                    )
+                    if refreshed_token:
+                        current_token_id = refreshed_token
                     time.sleep(_retry_backoff_seconds(attempt))
                     continue
 
@@ -313,7 +333,7 @@ class PolymarketExecutor:
                     order_id=None,
                     error=(
                         f"{err_msg} "
-                        f"(side={side}, token={token_id}, price={norm_price}, size={norm_size}, "
+                        f"(side={side}, token={current_token_id}, price={norm_price}, size={norm_size}, "
                         f"neg_risk={used_neg_risk}, order_type={used_order_type})"
                     ),
                 )
@@ -323,7 +343,7 @@ class PolymarketExecutor:
                 order_id=None,
                 error=(
                     "Ordem rejeitada apos retries por order_version_mismatch "
-                    f"(side={side}, token={token_id}, price={norm_price}, size={norm_size})"
+                    f"(side={side}, token={current_token_id}, price={norm_price}, size={norm_size})"
                 ),
             )
 
@@ -341,6 +361,88 @@ class PolymarketExecutor:
         except Exception:
             # Melhor esforço: o fluxo principal ainda decide sucesso/falha da ordem.
             return
+
+    def _refresh_token_id_from_market(
+        self,
+        market_id: Optional[str],
+        side: str,
+        current_token_id: str,
+    ) -> Optional[str]:
+        """Atualiza token_id a partir do market_id na Gamma API quando houver mismatch."""
+        if not market_id:
+            return None
+
+        market = self._fetch_market_from_gamma(market_id)
+        if not market:
+            return None
+
+        resolved = self._resolve_token_id_from_market(market, side)
+        if not resolved or resolved == current_token_id:
+            return None
+
+        return resolved
+
+    def _fetch_market_from_gamma(self, market_id: str) -> Optional[dict]:
+        """Busca snapshot atualizado do mercado na Gamma API."""
+        encoded_id = urllib.parse.quote(str(market_id), safe="")
+        urls = [
+            f"{GAMMA_API}/markets/{encoded_id}",
+            f"{GAMMA_API}/markets?id={encoded_id}",
+            f"{GAMMA_API}/markets?ids={encoded_id}",
+        ]
+
+        for url in urls:
+            try:
+                with urllib.request.urlopen(url, timeout=8) as response:
+                    if response.status != 200:
+                        continue
+                    payload = json.loads(response.read().decode("utf-8"))
+            except Exception:
+                continue
+
+            if isinstance(payload, dict) and payload.get("id"):
+                return payload
+
+            if isinstance(payload, list):
+                for item in payload:
+                    if str(item.get("id", "")) == str(market_id):
+                        return item
+                if payload and isinstance(payload[0], dict):
+                    return payload[0]
+
+        return None
+
+    def _resolve_token_id_from_market(self, market: dict, side: str) -> Optional[str]:
+        """Resolve token_id para YES/NO usando campos atuais do mercado."""
+        try:
+            outcomes_raw = market.get("outcomes", [])
+            outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
+            token_ids_raw = market.get("clobTokenIds", [])
+            token_ids = json.loads(token_ids_raw) if isinstance(token_ids_raw, str) else token_ids_raw
+        except Exception:
+            return None
+
+        if not isinstance(token_ids, list) or not token_ids:
+            return None
+
+        side_norm = (side or "YES").strip().upper()
+
+        if (
+            isinstance(outcomes, list)
+            and len(outcomes) >= 2
+            and str(outcomes[0]).strip().lower() == "yes"
+        ):
+            if side_norm == "YES" and len(token_ids) >= 1:
+                return str(token_ids[0])
+            if side_norm == "NO" and len(token_ids) >= 2:
+                return str(token_ids[1])
+            return None
+
+        # Multi-outcome: neste bot operamos apenas compra de outcome (YES).
+        if side_norm == "YES" and len(token_ids) >= 1:
+            return str(token_ids[0])
+
+        return None
 
     async def get_positions(self) -> list[dict]:
         """Retorna posições abertas do usuário."""

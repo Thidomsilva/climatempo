@@ -771,6 +771,7 @@ async def handle_trade_decision(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         side=opp.side,
         price=opp.market_price,
         size=user["trade_size"],
+        market_id=opp.market_id,
     )
 
     trade_id = db.log_trade(
