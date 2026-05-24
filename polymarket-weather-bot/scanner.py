@@ -16,7 +16,7 @@ import re
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 # ─── Fonte de resolução real: Wunderground ─────────────────────────────────────
@@ -101,6 +101,25 @@ MAX_HOURS_TO_CLOSE = 96     # não operar mercados muito distantes
 
 # Custos e margem operacional (fee + spread + slippage), abatidos do edge bruto.
 TRADING_COST_BUFFER = float(os.getenv("TRADING_COST_BUFFER", "0.03"))
+FORECAST_MODELS = [
+    m.strip() for m in os.getenv("FORECAST_MODELS", "gfs_seamless").split(",")
+    if m.strip()
+]
+
+MONTHS = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
 
 
 @dataclass
@@ -122,6 +141,13 @@ class Opportunity:
     icao:         str = ""
     gross_edge:   float = 0.0
     confidence:   float = 0.0
+
+
+@dataclass
+class ForecastEstimate:
+    temp: float
+    spread: float
+    model_count: int
 
 
 # ─── Extração de cidade do título ─────────────────────────────────────────────
@@ -158,36 +184,96 @@ async def fetch_forecast(
     lon: float,
     unit: str,
     mtype: str,
-) -> Optional[float]:
+    target_date: Optional[date] = None,
+) -> Optional[ForecastEstimate]:
     """
-    Busca temperatura máxima ou mínima prevista via Open-Meteo.
-    Open-Meteo usa ensemble GFS de 51 membros — mais preciso que NWS para cobertura global.
+    Busca previsão para a data-alvo usando um pequeno ensemble de modelos da Open-Meteo.
+    Retorna temperatura média e dispersão entre modelos (incerteza).
     """
     temp_unit = "fahrenheit" if unit == "F" else "celsius"
     field = "temperature_2m_max" if mtype == "high" else "temperature_2m_min"
 
-    params = {
-        "latitude":          lat,
-        "longitude":         lon,
-        "daily":             field,
-        "temperature_unit":  temp_unit,
-        "forecast_days":     5,
-        "timezone":          "auto",
-        "models":            "gfs_seamless",   # GFS global — consistente com Wunderground
-    }
+    target_iso = target_date.isoformat() if target_date else None
+    model_values: list[float] = []
 
-    try:
-        async with session.get(
-            METEO_API, params=params,
-            timeout=aiohttp.ClientTimeout(total=12)
-        ) as r:
-            if r.status != 200:
-                return None
-            data = await r.json()
-            temps = data["daily"].get(field, [])
-            return float(temps[0]) if temps else None
-    except Exception:
+    for model in FORECAST_MODELS:
+        params = {
+            "latitude":          lat,
+            "longitude":         lon,
+            "daily":             field,
+            "temperature_unit":  temp_unit,
+            "forecast_days":     10,
+            "timezone":          "auto",
+            "models":            model,
+        }
+
+        try:
+            async with session.get(
+                METEO_API,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=12)
+            ) as r:
+                if r.status != 200:
+                    continue
+                data = await r.json()
+                daily = data.get("daily", {})
+                temps = daily.get(field, [])
+                days = daily.get("time", [])
+                if not temps:
+                    continue
+
+                selected: Optional[float] = None
+                if target_iso and days and target_iso in days:
+                    idx = days.index(target_iso)
+                    if idx < len(temps):
+                        selected = float(temps[idx])
+                if selected is None:
+                    selected = float(temps[0])
+
+                model_values.append(selected)
+        except Exception:
+            continue
+
+    if not model_values:
         return None
+
+    if len(model_values) == 1:
+        spread = 0.6 if unit == "C" else 1.0
+    else:
+        spread = (max(model_values) - min(model_values)) / 2.0
+
+    mean_temp = sum(model_values) / len(model_values)
+    return ForecastEstimate(temp=mean_temp, spread=spread, model_count=len(model_values))
+
+
+def extract_target_date(question: str, end_dt_str: Optional[str]) -> Optional[date]:
+    """Extrai data do título (ex: on May 24). Fallback: data de fechamento do mercado."""
+    q = (question or "").lower()
+    m = re.search(r"on\s+([a-z]+)\s+(\d{1,2})(?:,\s*(\d{4}))?", q)
+    if m:
+        month_name = m.group(1)
+        day = int(m.group(2))
+        year_raw = m.group(3)
+        month = MONTHS.get(month_name)
+        if month:
+            now_utc = datetime.now(timezone.utc)
+            year = int(year_raw) if year_raw else now_utc.year
+            try:
+                candidate = date(year, month, day)
+                if not year_raw and candidate < now_utc.date():
+                    candidate = date(year + 1, month, day)
+                return candidate
+            except ValueError:
+                pass
+
+    if end_dt_str:
+        try:
+            end_dt = datetime.fromisoformat(end_dt_str.replace("Z", "+00:00"))
+            return end_dt.date()
+        except Exception:
+            return None
+
+    return None
 
 
 # ─── Cálculo de probabilidade por bucket ─────────────────────────────────────
@@ -198,6 +284,7 @@ def bucket_probability(
     high: Optional[float],
     unit: str,
     mtype: str,
+    extra_sigma: float = 0.0,
 ) -> float:
     """
     Estima P(temperatura cair no bucket) com distribuição normal.
@@ -211,6 +298,7 @@ def bucket_probability(
         sigma = 2.0 if mtype == "high" else 1.5
     else:
         sigma = 3.6 if mtype == "high" else 2.7
+    sigma = max(0.8, sigma + extra_sigma)
 
     if low is not None and high is not None:
         return norm.cdf(high, forecast, sigma) - norm.cdf(low, forecast, sigma)
@@ -281,47 +369,108 @@ def confidence_score(liquidity: float, hours_left: float, gross_edge: float) -> 
 
 async def fetch_all_weather_markets(session: aiohttp.ClientSession) -> list[dict]:
     """
-    Busca todos os mercados de clima ativos, paginando a Gamma API.
-    Filtra por tag 'weather' e 'daily-temperature'.
+    Busca mercados de temperatura ativos a partir dos eventos de clima.
+    A API de markets não está filtrando corretamente por tag em todos os casos,
+    então usamos events + tag_slug=weather e extraímos os markets embutidos.
     """
-    markets = []
-    tags = ["weather", "daily-temperature", "high-temperature", "low-temperature"]
-
+    markets: list[dict] = []
     seen_ids: set[str] = set()
 
-    for tag in tags:
-        offset = 0
-        while True:
-            params = {
-                "tag_slug": tag,
-                "active":   "true",
-                "closed":   "false",
-                "limit":    100,
-                "offset":   offset,
-            }
-            try:
-                async with session.get(
-                    f"{GAMMA_API}/markets",
-                    params=params,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as r:
-                    if r.status != 200:
-                        break
-                    data = await r.json()
-                    if not data:
-                        break
-                    for m in data:
+    offset = 0
+    while True:
+        params = {
+            "tag_slug": "weather",
+            "active": "true",
+            "closed": "false",
+            "limit": 100,
+            "offset": offset,
+        }
+
+        try:
+            async with session.get(
+                f"{GAMMA_API}/events",
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as r:
+                if r.status != 200:
+                    break
+                events = await r.json()
+                if not events:
+                    break
+
+                for event in events:
+                    title = (event.get("title") or "").lower()
+                    if (
+                        "highest temperature in" not in title
+                        and "lowest temperature in" not in title
+                    ):
+                        continue
+
+                    for m in (event.get("markets") or []):
+                        if not m.get("active", False) or m.get("closed", False):
+                            continue
                         mid = m.get("id", "")
-                        if mid and mid not in seen_ids:
-                            seen_ids.add(mid)
-                            markets.append(m)
-                    if len(data) < 100:
-                        break
-                    offset += 100
-            except Exception:
-                break
+                        if not mid or mid in seen_ids:
+                            continue
+                        seen_ids.add(mid)
+                        markets.append(m)
+
+                if len(events) < 100:
+                    break
+                offset += 100
+        except Exception:
+            break
 
     return markets
+
+
+def parse_bucket_from_question(question: str, unit: str) -> tuple[Optional[float], Optional[float]]:
+    """Extrai bucket de mercados binários (Yes/No) a partir do texto da pergunta."""
+    q = question.strip().lower()
+
+    # be 29°C or higher
+    m = re.search(r"be\s+(-?[\d.]+)\s*°?[cf]?\s*or\s*(?:higher|above|more)", q)
+    if m:
+        return float(m.group(1)), None
+
+    # be 15°C or below/lower
+    m = re.search(r"be\s+(-?[\d.]+)\s*°?[cf]?\s*or\s*(?:below|lower|less)", q)
+    if m:
+        return None, float(m.group(1))
+
+    # be 16°C on ...  -> exato (±0.5)
+    m = re.search(r"be\s+(-?[\d.]+)\s*°?[cf]?\s+on", q)
+    if m:
+        v = float(m.group(1))
+        return v - 0.5, v + 0.5
+
+    return None, None
+
+
+def extract_yes_price(market: dict, outcomes: list, prices_raw) -> Optional[float]:
+    """Retorna preço de YES usando outcomePrices ou fallback de book/último trade."""
+    # Formato clássico
+    if prices_raw and isinstance(prices_raw, list) and len(prices_raw) > 0:
+        try:
+            p = float(prices_raw[0])
+            if 0.0 <= p <= 1.0:
+                return p
+        except (ValueError, TypeError):
+            pass
+
+    # Fallback para formato novo
+    for key in ("yesPrice", "bestAsk", "bestBid", "lastTradePrice", "price"):
+        raw = market.get(key)
+        if raw is None:
+            continue
+        try:
+            p = float(raw)
+            if 0.0 <= p <= 1.0:
+                return p
+        except (ValueError, TypeError):
+            continue
+
+    return None
 
 
 # ─── Filtros de qualidade ────────────────────────────────────────────────────
@@ -373,7 +522,7 @@ async def scan_opportunities(min_edge: float = 0.15) -> list["Opportunity"]:
 
         # 2. Agrupa mercados por cidade para buscar forecast uma vez por cidade
         city_markets: dict[str, list[dict]] = {}
-        city_meta:    dict[str, tuple]       = {}  # city_key → (mtype, station_data)
+        city_meta:    dict[str, tuple]       = {}  # key -> (mtype, station_data, target_date)
 
         for market in markets:
             question = market.get("question", "")
@@ -381,16 +530,21 @@ async def scan_opportunities(min_edge: float = 0.15) -> list["Opportunity"]:
             if not parsed:
                 continue
             city_key, mtype, station = parsed
-            key = f"{city_key}|{mtype}"
+            target_date = extract_target_date(
+                question,
+                market.get("endDate") or market.get("end_date_iso"),
+            )
+            date_key = target_date.isoformat() if target_date else "unknown"
+            key = f"{city_key}|{mtype}|{date_key}"
             city_markets.setdefault(key, []).append(market)
-            city_meta[key] = (mtype, station)
+            city_meta[key] = (mtype, station, target_date)
 
         # 3. Busca forecasts em paralelo para todas as cidades únicas
         forecast_tasks = {}
-        for key, (mtype, station) in city_meta.items():
+        for key, (mtype, station, target_date) in city_meta.items():
             task = asyncio.create_task(
                 fetch_forecast(session, station["lat"], station["lon"],
-                               station["unit"], mtype)
+                               station["unit"], mtype, target_date)
             )
             forecast_tasks[key] = task
 
@@ -398,10 +552,12 @@ async def scan_opportunities(min_edge: float = 0.15) -> list["Opportunity"]:
 
         # 4. Para cada mercado, calcula edge por outcome
         for key, mlist in city_markets.items():
-            mtype, station = city_meta[key]
-            forecast_temp = forecasts.get(key)
-            if forecast_temp is None:
+            mtype, station, _ = city_meta[key]
+            forecast_est = forecasts.get(key)
+            if forecast_est is None:
                 continue
+            forecast_temp = forecast_est.temp
+            extra_sigma = forecast_est.spread * 0.5
 
             for market in mlist:
                 # Filtros de qualidade
@@ -411,10 +567,19 @@ async def scan_opportunities(min_edge: float = 0.15) -> list["Opportunity"]:
 
                 question = market.get("question", "")
                 market_id = market.get("id", "")
-                outcomes  = market.get("outcomes", [])
+                outcomes_raw = market.get("outcomes", [])
                 prices_raw = market.get("outcomePrices", [])
 
-                if not outcomes or not prices_raw:
+                # outcomes pode vir como JSON string.
+                if isinstance(outcomes_raw, str):
+                    try:
+                        outcomes = json.loads(outcomes_raw)
+                    except Exception:
+                        outcomes = []
+                else:
+                    outcomes = outcomes_raw
+
+                if not outcomes:
                     continue
 
                 # Token IDs para execução
@@ -428,7 +593,56 @@ async def scan_opportunities(min_edge: float = 0.15) -> list["Opportunity"]:
                 except Exception:
                     token_ids = []
 
-                # Avalia cada outcome (bucket)
+                is_binary_yes_no = len(outcomes) == 2 and str(outcomes[0]).lower() == "yes"
+
+                if is_binary_yes_no:
+                    yes_price = extract_yes_price(market, outcomes, prices_raw)
+                    if yes_price is None:
+                        continue
+
+                    low, high = parse_bucket_from_question(question, station["unit"])
+                    if low is None and high is None:
+                        continue
+
+                    model_prob = bucket_probability(
+                        forecast_temp, low, high, station["unit"], mtype, extra_sigma=extra_sigma
+                    )
+
+                    edge = model_prob - yes_price
+                    abs_edge = abs(edge)
+                    net_edge = abs_edge - TRADING_COST_BUFFER
+
+                    if net_edge < min_edge:
+                        continue
+
+                    token_id = token_ids[0] if token_ids else ""
+                    side = "YES" if edge > 0 else "NO"
+                    trade_price = yes_price if side == "YES" else (1 - yes_price)
+
+                    city_display = key.split("|")[0].title()
+
+                    opportunities.append(Opportunity(
+                        city=city_display,
+                        question=question,
+                        market_id=market_id,
+                        token_id=token_id,
+                        market_type=mtype,
+                        side=side,
+                        market_price=trade_price,
+                        model_prob=model_prob,
+                        edge=net_edge,
+                        unit=station["unit"],
+                        bucket_low=low,
+                        bucket_high=high,
+                        liquidity=liquidity,
+                        hours_to_close=hours_left,
+                        icao=station["icao"],
+                        gross_edge=abs_edge,
+                        confidence=confidence_score(liquidity, hours_left, abs_edge),
+                    ))
+                    continue
+
+                # Formato tradicional de buckets em outcomes
                 for i, outcome_label in enumerate(outcomes):
                     try:
                         price = float(prices_raw[i])
@@ -440,7 +654,7 @@ async def scan_opportunities(min_edge: float = 0.15) -> list["Opportunity"]:
                         continue
 
                     model_prob = bucket_probability(
-                        forecast_temp, low, high, station["unit"], mtype
+                        forecast_temp, low, high, station["unit"], mtype, extra_sigma=extra_sigma
                     )
 
                     edge = model_prob - price

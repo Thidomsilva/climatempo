@@ -16,6 +16,7 @@ from telegram.ext import (
     MessageHandler, ConversationHandler, ContextTypes, filters,
 )
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 
 import db
 import scanner
@@ -115,6 +116,17 @@ def main_menu_keyboard(connected: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+async def safe_query_answer(query):
+    """Responde callback query sem derrubar fluxo quando expirar no Telegram."""
+    try:
+        await query.answer()
+    except BadRequest as e:
+        msg = str(e).lower()
+        if "query is too old" in msg or "query id is invalid" in msg:
+            return
+        raise
+
+
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     log.info(f"[Start] recebido de chat_id={chat_id}")
@@ -175,7 +187,7 @@ def _wallet_type_keyboard() -> InlineKeyboardMarkup:
 async def connect_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Passo 1 — Apresenta aviso de segurança e escolha de carteira."""
     query = update.callback_query
-    await query.answer()
+    await safe_query_answer(query)
 
     await query.message.reply_text(
         "🔐 *Conectar Conta Polymarket*\n"
@@ -195,7 +207,7 @@ async def connect_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_wallet_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Passo 2 — Usuário selecionou o tipo de carteira."""
     query = update.callback_query
-    await query.answer()
+    await safe_query_answer(query)
     chat_id = update.effective_chat.id
 
     data = query.data  # "wtype_metamask" / "wtype_magic" / etc.
@@ -421,7 +433,7 @@ async def cancel_connect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def show_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_query_answer(query)
     chat_id = update.effective_chat.id
 
     try:
@@ -478,7 +490,7 @@ async def show_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def show_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_query_answer(query)
     chat_id = update.effective_chat.id
     user = db.get_user(chat_id)
 
@@ -511,7 +523,7 @@ async def show_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def set_size_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_query_answer(query)
     await query.message.reply_text(
         "💵 Digite o novo tamanho por trade em USDC (ex: `25`):",
         parse_mode=ParseMode.MARKDOWN,
@@ -539,7 +551,7 @@ async def receive_trade_size(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def set_edge_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_query_answer(query)
     await query.message.reply_text(
         "📉 Digite o edge mínimo em % para receber alertas (ex: `15` para 15%):",
         parse_mode=ParseMode.MARKDOWN,
@@ -571,7 +583,7 @@ async def receive_min_edge(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def scan_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_query_answer(query)
     chat_id = update.effective_chat.id
 
     user = db.get_user(chat_id)
@@ -624,7 +636,7 @@ async def send_opportunities(chat_id: int, opps: list, user: dict, app):
 async def handle_trade_decision(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Processa aprovação ou rejeição de um trade."""
     query = update.callback_query
-    await query.answer()
+    await safe_query_answer(query)
     chat_id = update.effective_chat.id
 
     data = query.data  # "exec_0" ou "skip_0"
@@ -739,7 +751,7 @@ async def handle_trade_decision(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def show_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_query_answer(query)
     chat_id = update.effective_chat.id
 
     trades = db.get_user_trades(chat_id, limit=10)
@@ -790,7 +802,7 @@ async def scan_loop(chat_id: int, app):
 
 async def toggle_scanner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_query_answer(query)
     chat_id = update.effective_chat.id
 
     user = db.get_user(chat_id)
@@ -806,7 +818,7 @@ async def toggle_scanner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def disconnect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_query_answer(query)
     chat_id = update.effective_chat.id
 
     db.delete_user(chat_id, delete_trades=False)
@@ -826,7 +838,7 @@ async def disconnect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def show_howto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_query_answer(query)
     await query.message.reply_text(
         "ℹ️ *Como funciona*\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -843,7 +855,7 @@ async def show_howto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def back_to_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_query_answer(query)
     chat_id = update.effective_chat.id
     user = db.get_user(chat_id)
     await query.message.reply_text(
