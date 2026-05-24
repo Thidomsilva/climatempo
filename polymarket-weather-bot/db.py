@@ -160,6 +160,17 @@ def set_user_active(chat_id: int, active: bool):
     conn.close()
 
 
+def delete_user(chat_id: int, delete_trades: bool = False):
+    """Remove sessão do usuário. Opcionalmente remove histórico de trades."""
+    conn = _open_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM users WHERE chat_id=?", (chat_id,))
+    if delete_trades:
+        c.execute("DELETE FROM trades WHERE chat_id=?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+
 def get_all_active_users() -> list[dict]:
     conn = _open_conn()
     c = conn.cursor()

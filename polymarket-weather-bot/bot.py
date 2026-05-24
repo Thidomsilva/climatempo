@@ -431,6 +431,7 @@ async def show_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     ex = exe.get_executor(chat_id, user["private_key"], user["proxy_wallet"])
     balance = await ex.get_balance()
+    balance_text = f"${balance:.2f} USDC" if balance is not None else "indisponível no momento"
     trades  = db.get_user_trades(chat_id, limit=5)
 
     executed = [t for t in trades if t["status"] == "executed"]
@@ -439,7 +440,7 @@ async def show_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
         f"📊 *Status da Conta*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Saldo:        `${balance:.2f} USDC`\n"
+        f"💰 Saldo:        `{balance_text}`\n"
         f"✅ Trades exec.: `{len(executed)}`\n"
         f"⏳ Pendentes:   `{len(pending)}`\n"
         f"⚙️ Tamanho/trade: `${user['trade_size']:.2f}`\n"
@@ -791,14 +792,17 @@ async def disconnect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     chat_id = update.effective_chat.id
 
-    db.set_user_active(chat_id, False)
+    db.delete_user(chat_id, delete_trades=False)
     exe.clear_executor(chat_id)
     task = _scan_tasks.pop(chat_id, None)
     if task and not task.done():
         task.cancel()
+    _pending_key.pop(chat_id, None)
+    _pending_wallet_type.pop(chat_id, None)
+    _pending_opps.pop(chat_id, None)
 
     await query.message.reply_text(
-        "🔌 Conta desconectada. Use /start para reconectar.",
+        "🔌 Conta desconectada com sucesso. Use /start para conectar novamente.",
         reply_markup=main_menu_keyboard(connected=False),
     )
 
@@ -828,7 +832,7 @@ async def back_to_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text(
         "🤖 *Menu Principal*",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_menu_keyboard(connected=bool(user)),
+        reply_markup=main_menu_keyboard(connected=bool(user and user.get("active", 0))),
     )
 
 
