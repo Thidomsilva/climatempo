@@ -263,6 +263,7 @@ class PolymarketExecutor:
             # Tentamos ambos para lidar com order_version_mismatch de forma robusta.
             neg_risk_candidates = (False, True)
             order_type_candidates = _order_type_candidates()
+            fallback_debug: list[str] = []
 
             for attempt in range(1, attempts + 1):
                 used_neg_risk = None
@@ -310,6 +311,8 @@ class PolymarketExecutor:
                     ) if _is_order_version_mismatch_error(e) else None
                     if native_result is not None:
                         return native_result
+                    if _is_order_version_mismatch_error(e):
+                        fallback_debug.append("native_limit_failed")
 
                     market_result = self._try_native_market_order(
                         token_id=current_token_id,
@@ -318,6 +321,8 @@ class PolymarketExecutor:
                     ) if _is_order_version_mismatch_error(e) else None
                     if market_result is not None:
                         return market_result
+                    if _is_order_version_mismatch_error(e):
+                        fallback_debug.append("native_market_failed")
 
                     if _is_order_version_mismatch_error(e) and attempt < attempts:
                         # Em mismatch recorrente, renovar sessão ajuda a alinhar versão/nonce.
@@ -386,6 +391,7 @@ class PolymarketExecutor:
                 )
                 if native_result is not None:
                     return native_result
+                fallback_debug.append("final_native_limit_failed")
 
                 market_result = self._try_native_market_order(
                     token_id=current_token_id,
@@ -394,16 +400,18 @@ class PolymarketExecutor:
                 )
                 if market_result is not None:
                     return market_result
+                fallback_debug.append("final_native_market_failed")
             except Exception as e:
                 # Mantém erro detalhado no retorno final abaixo.
-                pass
+                fallback_debug.append(f"final_fallback_exception={type(e).__name__}")
 
             return OrderResult(
                 success=False,
                 order_id=None,
                 error=(
                     "Ordem rejeitada apos retries por order_version_mismatch "
-                    f"(side={side}, token={current_token_id}, price={norm_price}, size={norm_size}, token_size={token_size})"
+                    f"(side={side}, token={current_token_id}, price={norm_price}, size={norm_size}, token_size={token_size}, "
+                    f"fallbacks={','.join(fallback_debug) if fallback_debug else 'none'})"
                 ),
             )
 
@@ -461,15 +469,17 @@ class PolymarketExecutor:
             from py_clob_client.clob_types import MarketOrderArgs
 
             # amount é em colateral (USDC), alinhado com trade_size do bot.
-            market_args = MarketOrderArgs(
-                token_id=token_id,
-                amount=float(amount_usdc),
-                price=float(preferred_price),
-            )
-            signed = self._clob_client.create_market_order(market_args)
+            # Primeiro tentamos price=0 para a biblioteca calcular preço de mercado.
+            for candidate_price in (0.0, float(preferred_price)):
+                market_args = MarketOrderArgs(
+                    token_id=token_id,
+                    amount=float(amount_usdc),
+                    price=float(candidate_price),
+                )
+                signed = self._clob_client.create_market_order(market_args)
 
-            for order_type in ("FOK", "GTC"):
-                resp = self._clob_client.post_order(signed, order_type)
+                # Para market order, GTC tende a ser o caminho mais estável na CLOB.
+                resp = self._clob_client.post_order(signed, "GTC")
                 if resp and resp.get("success"):
                     return OrderResult(
                         success=True,
