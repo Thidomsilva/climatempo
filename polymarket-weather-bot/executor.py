@@ -33,6 +33,11 @@ def _is_order_version_mismatch_error(err: object) -> bool:
     return "order_version_mismatch" in text
 
 
+def _retry_backoff_seconds(attempt: int) -> float:
+    """Backoff curto e progressivo para reenvio de ordens."""
+    return min(1.0, 0.25 * attempt)
+
+
 @dataclass
 class OrderResult:
     success:   bool
@@ -241,7 +246,9 @@ class PolymarketExecutor:
                     resp = self._clob_client.post_order(signed_order, "FOK")
                 except Exception as e:
                     if _is_order_version_mismatch_error(e) and attempt < attempts:
-                        time.sleep(0.25 * attempt)
+                        # Em mismatch recorrente, renovar sessão ajuda a alinhar versão/nonce.
+                        self._sync_refresh_order_session()
+                        time.sleep(_retry_backoff_seconds(attempt))
                         continue
                     return OrderResult(
                         success=False,
@@ -264,7 +271,8 @@ class PolymarketExecutor:
                     err_msg = f"Resposta inválida da CLOB: {resp}"
 
                 if _is_order_version_mismatch_error(err_msg) and attempt < attempts:
-                    time.sleep(0.25 * attempt)
+                    self._sync_refresh_order_session()
+                    time.sleep(_retry_backoff_seconds(attempt))
                     continue
 
                 return OrderResult(
@@ -291,6 +299,14 @@ class PolymarketExecutor:
                 order_id=None,
                 error=f"{type(e).__name__}: {e}",
             )
+
+    def _sync_refresh_order_session(self) -> None:
+        """Renova cliente/credenciais L2 para reduzir falhas transitórias de versão."""
+        try:
+            self._sync_authenticate()
+        except Exception:
+            # Melhor esforço: o fluxo principal ainda decide sucesso/falha da ordem.
+            return
 
     async def get_positions(self) -> list[dict]:
         """Retorna posições abertas do usuário."""
