@@ -424,44 +424,52 @@ async def show_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     chat_id = update.effective_chat.id
 
-    user = db.get_user(chat_id)
-    if not user:
-        await query.message.reply_text("⚠️ Conta não conectada. Use /start.")
-        return
+    try:
+        user = db.get_user(chat_id)
+        if not user:
+            await query.message.reply_text("⚠️ Conta não conectada. Use /start.")
+            return
 
-    ex = exe.get_executor(chat_id, user["private_key"], user["proxy_wallet"])
-    balance = await ex.get_balance()
-    balance_text = f"${balance:.2f} USDC" if balance is not None else "indisponível no momento"
-    trades  = db.get_user_trades(chat_id, limit=5)
+        ex = exe.get_executor(chat_id, user["private_key"], user["proxy_wallet"])
+        balance = await ex.get_balance()
+        balance_text = f"${balance:.2f} USDC" if balance is not None else "indisponível no momento"
+        trades  = db.get_user_trades(chat_id, limit=5)
 
-    executed = [t for t in trades if t["status"] == "executed"]
-    pending  = [t for t in trades if t["status"] == "pending"]
+        executed = [t for t in trades if t["status"] == "executed"]
+        pending  = [t for t in trades if t["status"] == "pending"]
+        short_wallet = f"{user['proxy_wallet'][:6]}...{user['proxy_wallet'][-4:]}"
 
-    text = (
-        f"📊 *Status da Conta*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Saldo:        `{balance_text}`\n"
-        f"✅ Trades exec.: `{len(executed)}`\n"
-        f"⏳ Pendentes:   `{len(pending)}`\n"
-        f"⚙️ Tamanho/trade: `${user['trade_size']:.2f}`\n"
-        f"📉 Edge mínimo:  `{user['min_edge']*100:.0f}%`\n"
-        f"🛡️ Conf. mínima: `{user.get('min_confidence', 0.55)*100:.0f}%`\n"
-        f"📦 Limite/dia:   `{int(user.get('max_daily_trades', 8))}` trades\n"
-        f"💵 Exposição/dia:`${float(user.get('max_daily_exposure', 100.0)):.0f}`\n"
-        f"🔄 Scanner:      `{'Ativo' if user['active'] else 'Pausado'}`\n"
-    )
+        text = (
+            f"📊 *Status da Conta*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👛 Wallet:       `{short_wallet}`\n"
+            f"💰 Saldo:        `{balance_text}`\n"
+            f"✅ Trades exec.: `{len(executed)}`\n"
+            f"⏳ Pendentes:   `{len(pending)}`\n"
+            f"⚙️ Tamanho/trade: `${user['trade_size']:.2f}`\n"
+            f"📉 Edge mínimo:  `{user['min_edge']*100:.0f}%`\n"
+            f"🛡️ Conf. mínima: `{user.get('min_confidence', 0.55)*100:.0f}%`\n"
+            f"📦 Limite/dia:   `{int(user.get('max_daily_trades', 8))}` trades\n"
+            f"💵 Exposição/dia:`${float(user.get('max_daily_exposure', 100.0)):.0f}`\n"
+            f"🔄 Scanner:      `{'Ativo' if user['active'] else 'Pausado'}`\n"
+        )
 
-    buttons = [[
-        InlineKeyboardButton("⏸ Pausar Scanner" if user["active"] else "▶️ Retomar Scanner",
-                             callback_data="toggle_scanner"),
-        InlineKeyboardButton("🔙 Menu", callback_data="menu"),
-    ]]
+        buttons = [[
+            InlineKeyboardButton("⏸ Pausar Scanner" if user["active"] else "▶️ Retomar Scanner",
+                                 callback_data="toggle_scanner"),
+            InlineKeyboardButton("🔙 Menu", callback_data="menu"),
+        ]]
 
-    await query.message.reply_text(
-        text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
+        await query.message.reply_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+    except Exception as e:
+        log.exception(f"[Status] erro para chat_id={chat_id}: {e}")
+        await query.message.reply_text(
+            "⚠️ Não consegui carregar o status agora. Tente novamente em alguns segundos."
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

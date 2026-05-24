@@ -102,8 +102,29 @@ class PolymarketExecutor:
             resp = self._clob_client.get_balance_allowance(
                 params={"asset_type": "USDC"}
             )
-            return float(resp.get("balance", 0)) / 1e6
-        except Exception:
+
+            # A API pode retornar estruturas diferentes dependendo da versão.
+            # Tentamos os campos mais comuns antes de desistir.
+            candidates = [
+                resp.get("balance") if isinstance(resp, dict) else None,
+                resp.get("availableBalance") if isinstance(resp, dict) else None,
+                resp.get("balanceAllowance") if isinstance(resp, dict) else None,
+            ]
+
+            for raw in candidates:
+                if raw is None:
+                    continue
+                try:
+                    value = float(raw)
+                    return value / 1e6 if value > 10_000 else value
+                except (ValueError, TypeError):
+                    continue
+
+            # Se veio dict sem campos conhecidos, não quebra o fluxo do bot.
+            print(f"[Executor] Saldo indisponível no formato retornado: {resp}")
+            return None
+        except Exception as e:
+            print(f"[Executor] Erro ao buscar saldo: {e}")
             return None
 
     async def place_order(

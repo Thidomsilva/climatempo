@@ -12,14 +12,26 @@ load_dotenv()
 
 def _build_secure_db_path() -> str:
     """Cria diretório privado para dados sensíveis e retorna caminho do SQLite."""
-    data_dir = os.getenv("APP_DATA_DIR", ".secure_data")
+    explicit_db_path = os.getenv("APP_DB_PATH", "").strip()
+
+    if explicit_db_path:
+        db_path = os.path.abspath(os.path.expanduser(explicit_db_path))
+        data_dir = os.path.dirname(db_path)
+    else:
+        # Default fora do repositório para reduzir risco de versionamento/acesso acidental.
+        data_dir = os.path.abspath(os.path.expanduser(
+            os.getenv("APP_DATA_DIR", "~/.local/share/polyweather_bot")
+        ))
+        db_file = os.getenv("APP_DB_FILE", "vault.db").strip() or "vault.db"
+        db_path = os.path.join(data_dir, db_file)
+
     os.makedirs(data_dir, mode=0o700, exist_ok=True)
     try:
         os.chmod(data_dir, 0o700)
     except OSError:
         # Em alguns ambientes (ex.: FS gerenciado), chmod pode não ser permitido.
         pass
-    return os.path.join(data_dir, "users.db")
+    return db_path
 
 
 DB_PATH = _build_secure_db_path()
@@ -34,6 +46,7 @@ fernet = Fernet(ENCRYPT_KEY.encode() if isinstance(ENCRYPT_KEY, str) else ENCRYP
 
 def _open_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA secure_delete = ON")
     try:
         os.chmod(DB_PATH, 0o600)
     except OSError:
