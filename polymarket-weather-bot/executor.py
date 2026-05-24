@@ -268,6 +268,17 @@ class PolymarketExecutor:
             for attempt in range(1, attempts + 1):
                 used_neg_risk = None
                 used_order_type = None
+                live_price = self._resolve_live_limit_price(
+                    token_id=current_token_id,
+                    fallback_price=norm_price,
+                    amount_usdc=norm_size,
+                )
+                live_token_size = float(
+                    Decimal(str(norm_size / live_price)).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                )
+                live_token_size = max(0.01, live_token_size)
                 try:
                     # Recria a ordem em cada tentativa para obter versão/timestamp atualizados.
                     resp = None
@@ -284,8 +295,8 @@ class PolymarketExecutor:
                             try:
                                 order_args = OrderArgs(
                                     token_id=current_token_id,
-                                    price=norm_price,
-                                    size=token_size,
+                                    price=live_price,
+                                    size=live_token_size,
                                     side=order_side,
                                 )
                                 signed_order = self._clob_client.create_order(order_args, options)
@@ -306,8 +317,8 @@ class PolymarketExecutor:
                     native_result = self._try_native_create_and_post_order(
                         token_id=current_token_id,
                         order_side=order_side,
-                        price=norm_price,
-                        size=norm_size,
+                        price=live_price,
+                        size=live_token_size,
                     ) if _is_order_version_mismatch_error(e) else None
                     if native_result is not None:
                         return native_result
@@ -341,7 +352,7 @@ class PolymarketExecutor:
                         order_id=None,
                         error=(
                             f"{type(e).__name__}: {e} "
-                            f"(side={side}, token={current_token_id}, price={norm_price}, size={norm_size}, token_size={token_size})"
+                            f"(side={side}, token={current_token_id}, price={live_price}, size={norm_size}, token_size={live_token_size})"
                         ),
                     )
 
@@ -376,7 +387,7 @@ class PolymarketExecutor:
                     order_id=None,
                     error=(
                         f"{err_msg} "
-                        f"(side={side}, token={current_token_id}, price={norm_price}, size={norm_size}, token_size={token_size}, "
+                        f"(side={side}, token={current_token_id}, price={live_price}, size={norm_size}, token_size={live_token_size}, "
                         f"neg_risk={used_neg_risk}, order_type={used_order_type})"
                     ),
                 )
@@ -457,6 +468,68 @@ class PolymarketExecutor:
             return None
         except Exception:
             return None
+
+    def _resolve_live_limit_price(
+        self,
+        token_id: str,
+        fallback_price: float,
+        amount_usdc: float,
+    ) -> float:
+        """Busca preço atualizado na CLOB para reduzir uso de preço stale."""
+        candidates: list[float] = []
+
+        # Endpoint de preço para lado BUY no token alvo.
+        try:
+            raw = self._clob_client.get_price(token_id, "BUY")
+            parsed = self._extract_price_value(raw)
+            if parsed is not None:
+                candidates.append(parsed)
+        except Exception:
+            pass
+
+        # Fallback para midpoint.
+        try:
+            raw_mid = self._clob_client.get_midpoint(token_id)
+            parsed_mid = self._extract_price_value(raw_mid)
+            if parsed_mid is not None:
+                candidates.append(parsed_mid)
+        except Exception:
+            pass
+
+        # Fallback para cálculo por livro de ordens com amount em USDC.
+        try:
+            calc = float(self._clob_client.calculate_market_price(token_id, "BUY", amount_usdc))
+            candidates.append(calc)
+        except Exception:
+            pass
+
+        if not candidates:
+            candidates.append(float(fallback_price))
+
+        live = candidates[0]
+        live = float(Decimal(str(live)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        return max(0.01, min(0.99, live))
+
+    @staticmethod
+    def _extract_price_value(raw: object) -> Optional[float]:
+        """Extrai preço de respostas numéricas/dict da API."""
+        if raw is None:
+            return None
+        if isinstance(raw, (int, float, str)):
+            try:
+                return float(raw)
+            except ValueError:
+                return None
+        if isinstance(raw, dict):
+            for key in ("price", "mid", "midpoint", "value"):
+                val = raw.get(key)
+                if val is None:
+                    continue
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    continue
+        return None
 
     def _try_native_market_order(
         self,
