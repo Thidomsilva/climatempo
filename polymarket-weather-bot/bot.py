@@ -616,13 +616,14 @@ async def scan_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parsed = snapshot.get("parseable_markets", 0)
         eligible = snapshot.get("monitorable_markets", 0)
         text = (
-            "😴 Nenhuma oportunidade encontrada agora.\n\n"
-            f"Resumo do scan:\n"
-            f"- Mercados ativos: {total}\n"
-            f"- Reconhecidos pelo bot: {parsed}\n"
-            f"- Dentro dos filtros: {eligible}"
+            "😴 *Nenhuma oportunidade encontrada agora*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Mercados ativos:      `{total}`\n"
+            f"🧠 Reconhecidos pelo bot:`{parsed}`\n"
+            f"🎯 Dentro dos filtros:   `{eligible}`\n"
+            "⏱️ Próximo scan auto:    `até 5 min`"
         )
-        await msg.edit_text(text)
+        await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
         return
 
     sent_count = await send_opportunities(chat_id, opps, user, ctx.application)
