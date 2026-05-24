@@ -47,6 +47,10 @@ _pending_key:         dict[int, str]  = {}
 _pending_wallet_type: dict[int, str]  = {}
 _pending_opps:        dict[int, list] = {}
 _scan_tasks:          dict[int, asyncio.Task] = {}
+_recent_alerts:       dict[int, dict[str, float]] = {}
+
+ALERT_COOLDOWN_SEC = int(os.getenv("ALERT_COOLDOWN_SEC", "900"))
+MAX_ALERTS_PER_SCAN = int(os.getenv("MAX_ALERTS_PER_SCAN", "5"))
 
 # ─── Tipos de carteira suportados ─────────────────────────────────────────────
 WALLET_TYPES = {
@@ -604,19 +608,63 @@ async def scan_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(text)
         return
 
-    await msg.edit_text(f"✅ {len(opps)} oportunidade(s) encontrada(s)!")
-    await send_opportunities(chat_id, opps, user, ctx.application)
+    sent_count = await send_opportunities(chat_id, opps, user, ctx.application)
+    if sent_count == 0:
+        await msg.edit_text(
+            "🔁 Há oportunidades abertas, mas já foram enviadas recentemente."
+        )
+        return
+
+    await msg.edit_text(
+        f"✅ {len(opps)} oportunidade(s) encontrada(s) | enviadas: {sent_count}."
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENVIO DE OPORTUNIDADES PARA APROVAÇÃO
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def send_opportunities(chat_id: int, opps: list, user: dict, app):
-    """Envia cada oportunidade com botões Executar / Ignorar."""
-    _pending_opps[chat_id] = {i: opp for i, opp in enumerate(opps[:5])}
+def opportunity_signature(opp) -> str:
+    low = "none" if opp.bucket_low is None else f"{opp.bucket_low:.2f}"
+    high = "none" if opp.bucket_high is None else f"{opp.bucket_high:.2f}"
+    return f"{opp.market_id}|{opp.side}|{low}|{high}|{opp.question}"
 
-    for i, opp in enumerate(opps[:5]):
+
+async def send_opportunities(chat_id: int, opps: list, user: dict, app) -> int:
+    """Envia oportunidades para aprovação, com deduplicação e cooldown."""
+    _pending_opps[chat_id] = {}
+
+    now = asyncio.get_running_loop().time()
+    recent = _recent_alerts.setdefault(chat_id, {})
+
+    for sig, ts in list(recent.items()):
+        if now - ts > ALERT_COOLDOWN_SEC:
+            recent.pop(sig, None)
+
+    filtered: list = []
+    seen_batch: set[str] = set()
+
+    for opp in opps:
+        sig = opportunity_signature(opp)
+        if sig in seen_batch:
+            continue
+        seen_batch.add(sig)
+
+        if sig in recent:
+            continue
+
+        recent[sig] = now
+        filtered.append(opp)
+
+        if len(filtered) >= MAX_ALERTS_PER_SCAN:
+            break
+
+    if not filtered:
+        return 0
+
+    _pending_opps[chat_id] = {i: opp for i, opp in enumerate(filtered)}
+
+    for i, opp in enumerate(filtered):
         text = scanner.format_opportunity(opp)
         text += f"\n\n💵 *Tamanho:* `${user['trade_size']:.2f} USDC`"
 
@@ -631,6 +679,8 @@ async def send_opportunities(chat_id: int, opps: list, user: dict, app):
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
+
+    return len(filtered)
 
 
 async def handle_trade_decision(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -794,8 +844,11 @@ async def scan_loop(chat_id: int, app):
         try:
             opps = await scanner.scan_opportunities(min_edge=user["min_edge"])
             if opps:
-                log.info(f"[ScanLoop] {len(opps)} oportunidades para {chat_id}")
-                await send_opportunities(chat_id, opps, user, app)
+                sent_count = await send_opportunities(chat_id, opps, user, app)
+                if sent_count > 0:
+                    log.info(
+                        f"[ScanLoop] {len(opps)} oportunidades para {chat_id} | enviadas={sent_count}"
+                    )
         except Exception as e:
             log.error(f"[ScanLoop] Erro para {chat_id}: {e}")
 
@@ -829,6 +882,7 @@ async def disconnect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     _pending_key.pop(chat_id, None)
     _pending_wallet_type.pop(chat_id, None)
     _pending_opps.pop(chat_id, None)
+    _recent_alerts.pop(chat_id, None)
 
     await query.message.reply_text(
         "🔌 Conta desconectada com sucesso. Use /start para conectar novamente.",
