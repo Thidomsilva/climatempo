@@ -43,10 +43,10 @@ def _retry_backoff_seconds(attempt: int) -> float:
 
 def _order_type_candidates() -> tuple[str, ...]:
     """Tipos de ordem tentados em sequência para reduzir rejeições transitórias."""
-    raw = os.getenv("ORDER_TYPE_CANDIDATES", "FOK,IOC")
+    raw = os.getenv("ORDER_TYPE_CANDIDATES", "FOK,GTC")
     parsed = [x.strip().upper() for x in raw.split(",") if x.strip()]
-    allowed = [x for x in parsed if x in {"FOK", "IOC", "GTC"}]
-    return tuple(allowed) if allowed else ("FOK", "IOC")
+    allowed = [x for x in parsed if x in {"FOK", "GTC", "GTD"}]
+    return tuple(allowed) if allowed else ("FOK", "GTC")
 
 
 @dataclass
@@ -337,6 +337,27 @@ class PolymarketExecutor:
                         f"neg_risk={used_neg_risk}, order_type={used_order_type})"
                     ),
                 )
+
+            # Última tentativa no caminho nativo do client (GTC + auto-resolve interno).
+            try:
+                fallback_args = OrderArgs(
+                    token_id=current_token_id,
+                    price=norm_price,
+                    size=norm_size,
+                    side=order_side,
+                )
+                fallback_resp = self._clob_client.create_and_post_order(fallback_args)
+                if fallback_resp and fallback_resp.get("success"):
+                    return OrderResult(
+                        success=True,
+                        order_id=fallback_resp.get("orderID", ""),
+                        error=None,
+                        size_filled=float(fallback_resp.get("sizeFilled", size)),
+                        price_avg=float(fallback_resp.get("price", price)),
+                    )
+            except Exception as e:
+                # Mantém erro detalhado no retorno final abaixo.
+                pass
 
             return OrderResult(
                 success=False,
