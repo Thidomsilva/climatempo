@@ -7,7 +7,7 @@ python-telegram-bot==20.7
 aiohttp==3.9.3
 
 # Polymarket CLOB
-py-clob-client==0.18.0
+py-clob-client==0.34.6
 
 # Ethereum (derivar endereço a partir da private key)
 eth-account==0.13.4
