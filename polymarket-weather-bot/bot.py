@@ -612,9 +612,15 @@ async def scan_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not opps:
         snapshot = await scanner.get_market_monitoring_snapshot(limit_questions=8)
+        total = snapshot.get("total_markets", 0)
+        parsed = snapshot.get("parseable_markets", 0)
+        eligible = snapshot.get("monitorable_markets", 0)
         text = (
             "😴 Nenhuma oportunidade encontrada agora.\n\n"
-            + scanner.format_market_snapshot(snapshot)
+            f"Resumo do scan:\n"
+            f"- Mercados ativos: {total}\n"
+            f"- Reconhecidos pelo bot: {parsed}\n"
+            f"- Dentro dos filtros: {eligible}"
         )
         await msg.edit_text(text)
         return
