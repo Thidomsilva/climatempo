@@ -66,6 +66,8 @@ class PolymarketExecutor:
                 funder=self.proxy_wallet,
             )
             creds = client.create_or_derive_api_creds()
+            # Garante credenciais L2 ativas para chamadas de saldo/ordem.
+            client.set_api_creds(creds)
             self._api_key        = creds.api_key
             self._api_secret     = creds.api_secret
             self._api_passphrase = creds.api_passphrase
@@ -84,7 +86,9 @@ class PolymarketExecutor:
     async def get_balance(self) -> Optional[float]:
         """Retorna saldo em USDC da carteira."""
         if not self._authenticated:
-            await self.authenticate()
+            ok = await self.authenticate()
+            if not ok:
+                return None
 
         try:
             result = await asyncio.get_event_loop().run_in_executor(
@@ -99,8 +103,10 @@ class PolymarketExecutor:
             if getattr(self, "_simulation_mode", False):
                 return 1000.0  # saldo simulado
 
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+
             resp = self._clob_client.get_balance_allowance(
-                params={"asset_type": "USDC"}
+                params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             )
 
             # A API pode retornar estruturas diferentes dependendo da versão.

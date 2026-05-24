@@ -482,6 +482,10 @@ async def show_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = db.get_user(chat_id)
 
+    if not user:
+        await query.message.reply_text("⚠️ Conta não conectada. Use /start para conectar.")
+        return
+
     text = (
         f"⚙️ *Configurações*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -580,7 +584,12 @@ async def scan_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     opps = await scanner.scan_opportunities(min_edge=user["min_edge"])
 
     if not opps:
-        await msg.edit_text("😴 Nenhuma oportunidade encontrada agora. Tente mais tarde.")
+        snapshot = await scanner.get_market_monitoring_snapshot(limit_questions=8)
+        text = (
+            "😴 Nenhuma oportunidade encontrada agora.\n\n"
+            + scanner.format_market_snapshot(snapshot)
+        )
+        await msg.edit_text(text)
         return
 
     await msg.edit_text(f"✅ {len(opps)} oportunidade(s) encontrada(s)!")

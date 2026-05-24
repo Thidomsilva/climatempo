@@ -484,6 +484,76 @@ async def scan_opportunities(min_edge: float = 0.15) -> list["Opportunity"]:
     return opportunities
 
 
+async def get_market_monitoring_snapshot(limit_questions: int = 8) -> dict:
+    """
+    Retorna um resumo dos mercados que o bot está monitorando no momento.
+    Útil para dar transparência quando nenhuma oportunidade for encontrada.
+    """
+    snapshot = {
+        "total_markets": 0,
+        "parseable_markets": 0,
+        "monitorable_markets": 0,
+        "cities": [],
+        "sample_questions": [],
+    }
+
+    async with aiohttp.ClientSession() as session:
+        markets = await fetch_all_weather_markets(session)
+        snapshot["total_markets"] = len(markets)
+
+        city_counts: dict[str, int] = {}
+        samples: list[tuple[float, str]] = []
+
+        for market in markets:
+            question = (market.get("question") or "").strip()
+            parsed = extract_city_from_question(question)
+            if not parsed:
+                continue
+
+            snapshot["parseable_markets"] += 1
+
+            city_key, _, _ = parsed
+            city_display = city_key.title()
+            city_counts[city_display] = city_counts.get(city_display, 0) + 1
+
+            ok, _, hours_left = passes_quality_filters(market)
+            if ok:
+                snapshot["monitorable_markets"] += 1
+                samples.append((hours_left, question))
+
+        top_cities = sorted(city_counts.items(), key=lambda it: it[1], reverse=True)
+        snapshot["cities"] = top_cities[:8]
+
+        samples.sort(key=lambda it: it[0])
+        snapshot["sample_questions"] = [q for _, q in samples[:limit_questions]]
+
+    return snapshot
+
+
+def format_market_snapshot(snapshot: dict) -> str:
+    """Formata snapshot de monitoramento para texto amigável no Telegram."""
+    lines = [
+        "Mercados monitorados agora:",
+        f"- Total ativos (API): {snapshot.get('total_markets', 0)}",
+        f"- Reconhecidos pelo bot: {snapshot.get('parseable_markets', 0)}",
+        f"- Dentro dos filtros (liq/tempo): {snapshot.get('monitorable_markets', 0)}",
+    ]
+
+    cities = snapshot.get("cities") or []
+    if cities:
+        city_text = ", ".join([f"{city} ({count})" for city, count in cities[:6]])
+        lines.append(f"- Cidades mais frequentes: {city_text}")
+
+    sample_questions = snapshot.get("sample_questions") or []
+    if sample_questions:
+        lines.append("")
+        lines.append("Exemplos de mercados ativos:")
+        for q in sample_questions[:5]:
+            lines.append(f"- {q[:90]}")
+
+    return "\n".join(lines)
+
+
 # ─── Formatação para Telegram ─────────────────────────────────────────────────
 
 def format_opportunity(opp: Opportunity) -> str:
