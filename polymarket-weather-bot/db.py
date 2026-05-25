@@ -69,6 +69,9 @@ def _ensure_user_columns(conn: sqlite3.Connection):
     if "sig_type" not in existing:
         c.execute("ALTER TABLE users ADD COLUMN sig_type INTEGER DEFAULT 1")
 
+    # Usuários que ficaram no corte antigo de 15% voltam para 10%.
+    c.execute("UPDATE users SET min_edge = 0.10 WHERE min_edge = 0.15")
+
 
 def init_db():
     conn = _open_conn()
@@ -80,7 +83,7 @@ def init_db():
             proxy_wallet  TEXT,
             sig_type      INTEGER DEFAULT 1,
             trade_size    REAL    DEFAULT 10.0,
-            min_edge      REAL    DEFAULT 0.15,
+            min_edge      REAL    DEFAULT 0.10,
             max_daily_trades   INTEGER DEFAULT 8,
             max_daily_exposure REAL    DEFAULT 100.0,
             min_confidence     REAL    DEFAULT 0.55,

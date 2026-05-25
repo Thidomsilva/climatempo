@@ -392,7 +392,7 @@ async def _finalize_connection(chat_id: int, private_key: str,
                 f"👛 Wallet:  `{short_wallet}`\n"
                 f"💰 Saldo:   `{balance_text}`\n\n"
                 "📡 *Scanner ativo* — você receberá alertas a cada 5 min "
-                "quando houver oportunidade com edge ≥ 15%.\n\n"
+                "quando houver oportunidade com edge ≥ 10%.\n\n"
                 "Use as configurações para ajustar tamanho e edge mínimo."
             ),
             parse_mode=ParseMode.MARKDOWN,
@@ -568,7 +568,7 @@ async def set_edge_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await safe_query_answer(query)
     await query.message.reply_text(
-        "📉 Digite o edge mínimo em % para receber alertas (ex: `15` para 15%):",
+        "📉 Digite o edge mínimo em % para receber alertas (ex: `10` para 10%):",
         parse_mode=ParseMode.MARKDOWN,
     )
     return WAITING_MIN_EDGE
